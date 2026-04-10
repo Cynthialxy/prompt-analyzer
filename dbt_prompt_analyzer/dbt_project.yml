@@ -1,0 +1,13 @@
+name: 'prompt_analyzer'
+version: '1.0.0'
+profile: 'prompt_analyzer'
+
+model-paths: ["models"]
+seed-paths: ["seeds"]
+
+models:
+  prompt_analyzer:
+    staging:
+      +materialized: view
+    marts:
+      +materialized: table

@@ -1,0 +1,10 @@
+prompt_analyzer:
+  target: dev
+  outputs:
+    dev:
+      type: athena
+      s3_staging_dir: s3://tripo-telescope/data-agent/athena-results/
+      region_name: us-west-2
+      database: silver
+      schema: analytics
+      work_group: tripo-analyst

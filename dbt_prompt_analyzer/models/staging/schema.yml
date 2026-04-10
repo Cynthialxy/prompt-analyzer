@@ -1,0 +1,32 @@
+version: 2
+
+sources:
+  - name: silver
+    database: silver
+    tables:
+      - name: clean_tripo_project
+
+models:
+  - name: stg_prompts
+    description: "Cleaned and type-cast prompt data with derived features"
+    columns:
+      - name: project_id
+        description: "Primary key"
+      - name: user_id
+        description: "User who created the prompt"
+      - name: prompt
+        description: "The 3D model generation prompt text"
+      - name: prompt_length
+        description: "Character count of the prompt"
+      - name: word_count
+        description: "Approximate word count"
+      - name: like_count
+        description: "Number of likes on the generated model"
+      - name: collect_count
+        description: "Number of collections"
+      - name: score
+        description: "Model quality score"
+      - name: has_color
+        description: "Whether prompt has color attributes"
+      - name: has_style
+        description: "Whether prompt has style attributes"

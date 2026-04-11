@@ -17,13 +17,19 @@ import UserPathPage from './pages/UserPathPage';
 import TopicAnalysisPage from './pages/TopicAnalysisPage';
 import TemplateMarketPage from './pages/TemplateMarketPage';
 
+// Data is shared globally via React Query cache.
+// staleTime: 5 minutes — tab switches reuse cached data, no duplicate requests.
+// gcTime: 10 minutes — keep data in memory even when no component is subscribed.
+const STALE_TIME = 5 * 60 * 1000;
+const GC_TIME = 10 * 60 * 1000;
+
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       retry: 1,
       refetchOnWindowFocus: false,
-      staleTime: 0,
-      gcTime: 0,
+      staleTime: STALE_TIME,
+      gcTime: GC_TIME,
     },
   },
 });

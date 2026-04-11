@@ -363,7 +363,86 @@ def get_category_distributions() -> dict:
     return result
 
 
-def get_daily_counts(date_from: str = None, date_to: str = None) -> list[dict]:
+def compute_quality_from_prompts() -> dict:
+    """Compute proxy quality metrics from local prompt data without LLM.
+
+    Dimensions (all scaled 1-5):
+    - specificity:    prompt length proxy (longer = more specific)
+    - clarity:        has llm_category (structured = clearer)
+    - creativity:     has llm_style and style is non-generic
+    - technical_detail: has color / keyword / object tags
+    """
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT
+                LENGTH(prompt) as plen,
+                llm_category,
+                llm_style,
+                llm_color,
+                llm_keyword,
+                llm_object
+            FROM prompts
+            WHERE prompt IS NOT NULL AND prompt != ''
+        """).fetchall()
+
+    if not rows:
+        return {"scores": [], "summary": {}, "sample_size": 0}
+
+    GENERIC_STYLES = {'realistic', 'stylized', ''}
+
+    specificity_vals, clarity_vals, creativity_vals, tech_vals = [], [], [], []
+
+    for r in rows:
+        plen = r['plen'] or 0
+        # specificity: 0-50→1, 51-100→2, 101-200→3, 201-400→4, 400+→5
+        if plen <= 50:    spec = 1
+        elif plen <= 100: spec = 2
+        elif plen <= 200: spec = 3
+        elif plen <= 400: spec = 4
+        else:             spec = 5
+        specificity_vals.append(spec)
+
+        # clarity: has category → 4-5, else 2-3
+        has_cat = bool(r['llm_category'] and r['llm_category'].strip())
+        clarity_vals.append(4 if has_cat else 2)
+
+        # creativity: non-generic style → higher
+        style = (r['llm_style'] or '').strip().lower()
+        if style and style not in GENERIC_STYLES:
+            creativity_vals.append(4)
+        elif style in GENERIC_STYLES and style:
+            creativity_vals.append(3)
+        else:
+            creativity_vals.append(2)
+
+        # technical_detail: count how many tag fields are filled
+        filled = sum([
+            bool(r['llm_color'] and r['llm_color'].strip()),
+            bool(r['llm_keyword'] and r['llm_keyword'].strip()),
+            bool(r['llm_object'] and r['llm_object'].strip()),
+            bool(r['llm_style'] and r['llm_style'].strip()),
+        ])
+        tech_vals.append(max(1, min(5, filled + 1)))
+
+    def _dim_summary(vals):
+        mean = round(sum(vals) / len(vals), 2)
+        return {
+            "mean": mean,
+            "distribution": {str(i): vals.count(i) for i in range(1, 6)},
+        }
+
+    summary = {
+        "specificity":     _dim_summary(specificity_vals),
+        "clarity":         _dim_summary(clarity_vals),
+        "creativity":      _dim_summary(creativity_vals),
+        "technical_detail": _dim_summary(tech_vals),
+    }
+    all_means = [summary[d]["mean"] for d in summary]
+    summary["overall"] = {"mean": round(sum(all_means) / len(all_means), 2)}
+
+    return {"scores": [], "summary": summary, "sample_size": len(rows)}
+
+
     """Get daily prompt counts, optionally filtered by date range."""
     date_sql, date_params = _date_where(date_from, date_to, "AND")
     with get_conn() as conn:

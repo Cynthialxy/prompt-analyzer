@@ -76,7 +76,9 @@ const LanguagePage: React.FC = () => {
     creativity: '创造力',
     technical_detail: '技术细节',
   };
-  const qualityRadarOption = quality?.summary ? {
+  const hasQualityData = quality?.summary && qualityDims.some(d => quality.summary[d]?.mean > 0);
+
+  const qualityRadarOption = hasQualityData ? {
     radar: {
       indicator: qualityDims.map(d => ({ name: qualityDimLabels[d] || d, max: 5 })),
     },
@@ -91,8 +93,7 @@ const LanguagePage: React.FC = () => {
     }],
   } : null;
 
-  // Quality bar per dimension
-  const qualityBarOption = quality?.summary ? {
+  const qualityBarOption = hasQualityData ? {
     tooltip: { trigger: 'axis' as const },
     grid: { left: 120, right: 20, top: 10, bottom: 30 },
     xAxis: { type: 'value' as const, max: 5 },

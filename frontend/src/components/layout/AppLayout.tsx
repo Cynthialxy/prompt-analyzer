@@ -10,16 +10,49 @@ import {
   TableOutlined,
   SyncOutlined,
   PlayCircleOutlined,
-  UserOutlined,
   ThunderboltOutlined,
-  RetweetOutlined,
   ForkOutlined,
   AppstoreOutlined,
   FileTextOutlined,
 } from '@ant-design/icons';
 import { useNavigate, useLocation, Outlet } from 'react-router-dom';
-import { usePipelineStatus } from '../../hooks/useAnalysisData';
+import {
+  usePipelineStatus,
+  useSummary,
+  useDailyCounts,
+  useCategories,
+  useTopics,
+  useIntents,
+  useLanguage,
+  useTrends,
+  useThemeSummary,
+  useEffectAnalysis,
+  useRetention,
+  useUserPath,
+  useBERTopic,
+  useHotTemplates,
+  useUserSegments,
+  useInvalidateCoreData,
+} from '../../hooks/useAnalysisData';
 import { runPipeline, syncData } from '../../api/endpoints';
+
+// Prefetch all core data once at app load so every tab reads from cache.
+function useGlobalPrefetch() {
+  useSummary();
+  useDailyCounts();
+  useCategories();
+  useTopics();
+  useIntents();
+  useLanguage();
+  useTrends();
+  useThemeSummary();
+  useEffectAnalysis('like_count');
+  useRetention();
+  useUserPath();
+  useBERTopic();
+  useHotTemplates();
+  useUserSegments();
+}
 
 const { Sider, Content, Header } = Layout;
 
@@ -43,6 +76,10 @@ const AppLayout: React.FC = () => {
   const [collapsed, setCollapsed] = useState(false);
   const [pipelinePolling, setPipelinePolling] = useState(false);
   const { data: pipelineStatus } = usePipelineStatus(pipelinePolling);
+  const invalidateCoreData = useInvalidateCoreData();
+
+  // Trigger all core queries at app load — results are cached and reused by each tab.
+  useGlobalPrefetch();
 
   const handleSync = async () => {
     try {
@@ -68,6 +105,8 @@ const AppLayout: React.FC = () => {
     if (pipelineStatus?.status === 'completed' || pipelineStatus?.status === 'failed') {
       setPipelinePolling(false);
       if (pipelineStatus.status === 'completed') {
+        // Pipeline produced new data — invalidate all cached queries so every tab reloads.
+        invalidateCoreData();
         message.success('分析管线已完成！');
       } else {
         message.error(`分析管线失败：${pipelineStatus.error}`);

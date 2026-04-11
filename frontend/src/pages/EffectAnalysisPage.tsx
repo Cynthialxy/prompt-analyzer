@@ -32,7 +32,7 @@ const EffectAnalysisPage: React.FC = () => {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [metric, setMetric] = useState('like_count');
-  const { data, isLoading, refetch } = useEffectAnalysis(metric);
+  const { data, isLoading } = useEffectAnalysis(metric);
 
   const handleRefresh = () => {
     queryClient.invalidateQueries({ queryKey: ['effect-analysis'] });
@@ -102,10 +102,12 @@ const EffectAnalysisPage: React.FC = () => {
   const heatmapOption = heatmap.features?.length ? {
     tooltip: {
       position: 'top',
-      formatter: (p: { data: number[] }) => {
-        const f1 = heatmap.features[p.data[0]];
-        const f2 = heatmap.features[p.data[1]];
-        return `${f1} × ${f2}<br/>r = ${p.data[2]}`;
+      formatter: (p: { data: (number | null)[] }) => {
+        const f1 = heatmap.features[p.data[0] as number];
+        const f2 = heatmap.features[p.data[1] as number];
+        const r = p.data[2];
+        if (r == null) return `${f1} × ${f2}<br/>r = 无数据`;
+        return `${f1} × ${f2}<br/>r = ${Number(r).toFixed(3)}`;
       },
     },
     grid: { left: 160, right: 40, top: 160, bottom: 20 },
@@ -127,7 +129,15 @@ const EffectAnalysisPage: React.FC = () => {
     series: [{
       type: 'heatmap',
       data: heatmap.values || [],
-      label: { show: true, fontSize: 9, formatter: (p: { data: number[] }) => p.data[2].toFixed(2) },
+      label: {
+        show: true,
+        fontSize: 9,
+        formatter: (p: { data: (number | null)[] }) => {
+          const r = p.data[2];
+          if (r == null) return '-';
+          return r === 1 ? '1' : r === 0 ? '0' : Number(r).toFixed(2);
+        },
+      },
     }],
   } : null;
 
@@ -284,6 +294,24 @@ const EffectAnalysisPage: React.FC = () => {
           <Col xs={24} lg={12}>
             <Card title="特征间共线性热力图" bordered={false}>
               <EChartsWrapper option={heatmapOption} height={400} />
+              <Alert
+                type="info"
+                showIcon
+                style={{ marginTop: 12, lineHeight: 1.8 }}
+                description={
+                  <>
+                    <div style={{ marginBottom: 4 }}>
+                      <span style={{ fontWeight: 600 }}>长度特征高度冗余</span>：图表中深绿色区域集中在「Prompt 长度」、「词数」、「长/超长 Prompt」之间，它们的相关性均大于 0.75。这说明在衡量 Prompt 长度时，这四个指标描述的是同一件事，后续分析只需保留「Prompt 长度」即可。
+                    </div>
+                    <div style={{ marginBottom: 4 }}>
+                      <span style={{ fontWeight: 600 }}>内容维度独立性强</span>：仔细看「含颜色」、「含风格」、「含细节」等内容特征，它们之间的格子基本接近白色（r接近0）。这意味着用户的这些写作习惯是互相独立的，可以作为评价 Prompt 质量的独立维度。
+                    </div>
+                    <div>
+                      <span style={{ fontWeight: 600 }}>字多不等于细节多</span>：最下方「长度类」与「内容类」特征交界的区域颜色很浅，说明即使 Prompt 写得很长，也不必然意味着用户使用了更多专业的参数标签或细节描述。
+                    </div>
+                  </>
+                }
+              />
             </Card>
           </Col>
         )}

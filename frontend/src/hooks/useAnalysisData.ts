@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   fetchSummary,
   fetchCategories,
@@ -21,7 +21,32 @@ import {
   fetchHotTemplates,
 } from '../api/endpoints';
 
-// No caching — all queries fetch fresh data every time
+// All core query keys — used for cache invalidation after pipeline completes.
+export const CORE_QUERY_KEYS = [
+  ['summary'],
+  ['daily-counts'],
+  ['categories'],
+  ['topics'],
+  ['intents'],
+  ['language'],
+  ['trends'],
+  ['keywords'],
+  ['theme-summary'],
+  ['effect-analysis'],
+  ['retention'],
+  ['user-path'],
+  ['bertopic'],
+  ['hot-templates'],
+  ['user-segments'],
+];
+
+// Call this after pipeline completes to force all tabs to reload fresh data.
+export const useInvalidateCoreData = () => {
+  const queryClient = useQueryClient();
+  return () => {
+    CORE_QUERY_KEYS.forEach((key) => queryClient.invalidateQueries({ queryKey: key }));
+  };
+};
 
 export const useSummary = (dateRange?: { date_from?: string; date_to?: string }) =>
   useQuery({

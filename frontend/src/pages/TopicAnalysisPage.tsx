@@ -215,22 +215,26 @@ const TopicAnalysisPage: React.FC = () => {
     }],
   };
 
+  // Dynamic insight: plain-language summary for the scatter chart
+  const scatterInsight = (() => {
+    if (!topQualityTopics.length || !scatterDataSource.length) return null;
+    const top = topQualityTopics[0];
+    const aboveAvgCount = scatterDataSource.filter(t => t.effectIndex >= 1).length;
+    const belowAvgTop = [...scatterDataSource]
+      .filter(t => t.size >= largeTopicThreshold && t.effectIndex < 1)
+      .sort((a, b) => b.size - a.size)[0];
+    const parts: string[] = [
+      `垂直精准主题的获赞效率远超通用主题：「${top.displayLabel}」每千条 Prompt 获赞是平台均值的 ${formatEffectIndex(top.effectIndex)}，共 ${aboveAvgCount} 个主题超过平台平均水平。`,
+    ];
+    if (belowAvgTop) {
+      parts.push(`而规模最大的「${belowAvgTop.displayLabel}」效率仅为均值的 ${formatEffectIndex(belowAvgTop.effectIndex)}。`);
+    }
+    parts.push('主题规模越大，单条获赞越少 — 建议优先引导用户创作 Logo、角色等垂直类内容。');
+    return parts.join('');
+  })();
+
   // Topic quality scatter: size vs avg_likes
   const scatterOption = {
-    graphic: [
-      {
-        type: 'text',
-        left: 60,
-        top: 34,
-        style: {
-          text: '📊 数据洞察：整体来看，主题规模与单条获赞效率呈显著负相关，小而精的垂类主题千赞效率远高于大而全的通用主题',
-          fill: '#1677ff',
-          font: '700 13px sans-serif',
-          width: 620,
-          overflow: 'break',
-        },
-      },
-    ],
     tooltip: {
       trigger: 'item' as const,
       confine: true,
@@ -250,7 +254,7 @@ const TopicAnalysisPage: React.FC = () => {
         ].join('<br/>');
       },
     },
-    grid: { left: 60, right: 40, top: 92, bottom: 40 },
+    grid: { left: 60, right: 40, top: 50, bottom: 40 },
     legend: { right: 0, top: 0, data: ['主题气泡', '趋势线'] },
     xAxis: { type: 'value' as const, name: '主题规模（累计生成Prompt数）', nameLocation: 'middle' as const, nameGap: 25 },
     yAxis: {
@@ -409,6 +413,14 @@ const TopicAnalysisPage: React.FC = () => {
 
       <Row gutter={[16, 16]}>
         <Col xs={24} lg={12}>
+          {scatterInsight && (
+            <Alert
+              type="info"
+              showIcon
+              description={scatterInsight}
+              style={{ marginBottom: 8, lineHeight: 1.8 }}
+            />
+          )}
           <Card title="主题 - 效果散点图（规模 vs 点赞数）" bordered={false}
             extra={<Text type="secondary" style={{ fontSize: 12 }}>气泡大小代表主题累计生成量</Text>}>
             <EChartsWrapper

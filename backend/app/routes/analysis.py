@@ -100,10 +100,14 @@ def get_language():
     if not lang:
         return jsonify({"error": "No language analysis results. Run the pipeline first."}), 404
 
+    # If quality is missing or summary is empty, compute from local data
+    if not quality or not quality.get("summary"):
+        quality = cache_service.compute_quality_from_prompts()
+
     return jsonify({
         "language": lang,
         "text_stats": stats or {},
-        "quality": quality or {},
+        "quality": quality,
     })
 
 

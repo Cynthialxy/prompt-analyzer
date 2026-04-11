@@ -1,9 +1,19 @@
 from flask import Flask
 from flask_cors import CORS
+from flask.json.provider import DefaultJSONProvider
+
+
+class _StrictJSONProvider(DefaultJSONProvider):
+    """Reject NaN/Infinity so browsers always receive valid JSON."""
+    def dumps(self, obj, **kwargs):
+        kwargs.setdefault("allow_nan", False)
+        return super().dumps(obj, **kwargs)
 
 
 def create_app():
     app = Flask(__name__)
+    app.json_provider_class = _StrictJSONProvider
+    app.json = _StrictJSONProvider(app)
     CORS(app)
 
     from app.routes.data import data_bp

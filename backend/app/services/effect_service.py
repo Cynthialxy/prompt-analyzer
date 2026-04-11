@@ -322,7 +322,9 @@ def _compute_feature_correlations(metric: str) -> dict:
         heatmap_values = []
         for i, c1 in enumerate(feature_cols):
             for j, c2 in enumerate(feature_cols):
-                heatmap_values.append([i, j, round(float(corr_matrix.loc[c1, c2]), 3)])
+                val = float(corr_matrix.loc[c1, c2])
+                # NaN is not valid JSON — replace with null so browsers parse correctly
+                heatmap_values.append([i, j, None if np.isnan(val) else round(val, 3)])
         heatmap_data = {
             "features": heatmap_features,
             "values": heatmap_values,

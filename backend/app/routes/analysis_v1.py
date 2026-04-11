@@ -6,6 +6,7 @@ from app.services import (
     cache_service, embedding_service, effect_service,
     user_service, llm_service, retention_service,
     path_service, bertopic_service, template_service,
+    athena_service,
 )
 
 analysis_v1_bp = Blueprint("analysis_v1", __name__)
@@ -51,17 +52,32 @@ def get_prompt_intent():
     project_id = request.args.get("project_id")
 
     if project_id:
-        # Single prompt analysis
+        # Single prompt analysis — try local cache first, fallback to Athena
+        prompt_text = None
         with cache_service.get_conn() as conn:
             row = conn.execute(
                 "SELECT prompt FROM prompts WHERE project_id = ?", (project_id,)
             ).fetchone()
-        if not row or not row["prompt"]:
+            if row and row["prompt"]:
+                prompt_text = row["prompt"]
+
+        if not prompt_text:
+            try:
+                r = athena_service.run_query(
+                    f"SELECT prompt FROM silver.clean_tripo_project "
+                    f"WHERE project_id = '{project_id}' LIMIT 1"
+                )
+                if r["rows"] and r["rows"][0].get("prompt"):
+                    prompt_text = r["rows"][0]["prompt"]
+            except Exception:
+                pass
+
+        if not prompt_text:
             return jsonify({"error": "Prompt not found"}), 404
 
-        result = llm_service.classify_intent_v2(row["prompt"])
+        result = llm_service.classify_intent_v2(prompt_text)
         result["project_id"] = project_id
-        result["prompt"] = row["prompt"]
+        result["prompt"] = prompt_text
         return jsonify(result)
     else:
         # Batch distribution (from cached analysis)
@@ -77,17 +93,32 @@ def get_prompt_quality():
     project_id = request.args.get("project_id")
 
     if project_id:
-        # Single prompt quality
+        # Single prompt quality — try local cache first, fallback to Athena
+        prompt_text = None
         with cache_service.get_conn() as conn:
             row = conn.execute(
                 "SELECT prompt FROM prompts WHERE project_id = ?", (project_id,)
             ).fetchone()
-        if not row or not row["prompt"]:
+            if row and row["prompt"]:
+                prompt_text = row["prompt"]
+
+        if not prompt_text:
+            try:
+                r = athena_service.run_query(
+                    f"SELECT prompt FROM silver.clean_tripo_project "
+                    f"WHERE project_id = '{project_id}' LIMIT 1"
+                )
+                if r["rows"] and r["rows"][0].get("prompt"):
+                    prompt_text = r["rows"][0]["prompt"]
+            except Exception:
+                pass
+
+        if not prompt_text:
             return jsonify({"error": "Prompt not found"}), 404
 
-        result = llm_service.classify_intent_v2(row["prompt"])
+        result = llm_service.classify_intent_v2(prompt_text)
         result["project_id"] = project_id
-        result["prompt"] = row["prompt"]
+        result["prompt"] = prompt_text
         return jsonify(result)
     else:
         # Aggregate quality (from cached analysis)
@@ -142,10 +173,15 @@ def get_similar_prompts():
 
 @analysis_v1_bp.route("/effect")
 def get_effect_analysis():
-    """Get effect analysis: always compute fresh from Athena."""
+    """Get effect analysis: serve from cache if available, else compute from Athena."""
     metric = request.args.get("metric", "like_count")
+    cache_key = f"effect_analysis_{metric}"
     try:
+        cached = cache_service.get_analysis_result(cache_key)
+        if cached:
+            return jsonify(cached)
         result = effect_service.compute_effect_analysis(metric=metric)
+        cache_service.save_analysis_result(cache_key, result)
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500

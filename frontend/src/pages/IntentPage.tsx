@@ -371,7 +371,7 @@ const IntentPage: React.FC = () => {
                 )}
               />
             ) : (
-              <Empty description="点击左侧树图的意图方块查看对应示例" />
+              <Empty description="点击上方树图的意图方块查看对应示例" />
             )}
 
             {/* Quick select tags */}

@@ -1,6 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { Row, Col, Card, DatePicker, Typography } from 'antd';
 import { useNavigate } from 'react-router-dom';
+import dayjs from 'dayjs';
 import {
   FileTextOutlined,
   TeamOutlined,
@@ -269,8 +270,18 @@ function buildInsight(d: InsightData): React.ReactNode {
   );
 }
 
+const DATE_RANGE_KEY = 'dashboard_date_range';
+
+function loadSavedDateRange(): { date_from?: string; date_to?: string } {
+  try {
+    const saved = localStorage.getItem(DATE_RANGE_KEY);
+    if (saved) return JSON.parse(saved);
+  } catch { /* ignore */ }
+  return {};
+}
+
 const DashboardPage: React.FC = () => {
-  const [dateRange, setDateRange] = useState<{ date_from?: string; date_to?: string }>({});
+  const [dateRange, setDateRange] = useState<{ date_from?: string; date_to?: string }>(loadSavedDateRange);
 
   const { data: summary, isLoading: summaryLoading } = useSummary(dateRange);
   const { data: categories, isLoading: catLoading } = useCategories();
@@ -279,9 +290,12 @@ const DashboardPage: React.FC = () => {
 
   const handleDateChange = (dates: [Dayjs | null, Dayjs | null] | null) => {
     if (dates && dates[0] && dates[1]) {
-      setDateRange({ date_from: dates[0].format('YYYY-MM-DD'), date_to: dates[1].format('YYYY-MM-DD') });
+      const range = { date_from: dates[0].format('YYYY-MM-DD'), date_to: dates[1].format('YYYY-MM-DD') };
+      setDateRange(range);
+      localStorage.setItem(DATE_RANGE_KEY, JSON.stringify(range));
     } else {
       setDateRange({});
+      localStorage.removeItem(DATE_RANGE_KEY);
     }
   };
 
@@ -393,7 +407,12 @@ const DashboardPage: React.FC = () => {
       {/* Date Filter */}
       <Card bordered={false} style={{ marginBottom: 16 }}>
         <span style={{ marginRight: 12 }}>时间范围：</span>
-        <RangePicker onChange={handleDateChange} allowClear placeholder={['开始日期', '结束日期']} />
+        <RangePicker
+          value={dateRange.date_from ? [dayjs(dateRange.date_from), dayjs(dateRange.date_to)] : null}
+          onChange={handleDateChange}
+          allowClear
+          placeholder={['开始日期', '结束日期']}
+        />
         {dateRange.date_from && (
           <span style={{ marginLeft: 12, color: '#666', fontSize: 13 }}>
             {dateRange.date_from} ~ {dateRange.date_to}

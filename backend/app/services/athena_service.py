@@ -104,10 +104,9 @@ def fetch_and_cache_prompts(days: int = 7, limit: int = 50000) -> int:
 
 
 def fetch_incremental() -> int:
-    """Incremental sync: fetch all rows newer than the latest cached pt, partition by partition.
+    """Incremental sync: fetch all rows newer than the latest cached pt in a single query.
 
-    If cache is empty, fetches all available data partition by partition.
-    Uses INSERT OR REPLACE so existing rows get updated engagement counts too.
+    Uses pt BETWEEN for partition pruning — single Athena query instead of N serial queries.
     Returns total number of new/updated rows fetched from Athena.
     """
     latest_pt = cache_service.get_latest_pt()
@@ -119,44 +118,28 @@ def fetch_incremental() -> int:
         where_clause = ""
         logger.info("Incremental sync: cold start, fetching all data")
 
-    # First get the list of partitions to fetch
-    pt_sql = f"""
-        SELECT DISTINCT pt
+    # Single query with partition pruning — Athena handles partition discovery internally
+    sql = f"""
+        SELECT project_id, user_id, prompt, caption, name,
+               llm_keyword, llm_object, llm_category, llm_style,
+               llm_color, llm_use_case, llm_height, from_type,
+               status, visibility, display_image,
+               like_count, collect_count, score,
+               created_at, pt
         FROM silver.clean_tripo_project
         WHERE prompt IS NOT NULL AND prompt != ''
           {where_clause}
         ORDER BY pt ASC
     """
-    pt_result = run_query(pt_sql)
-    partitions = [r["pt"] for r in pt_result["rows"] if r.get("pt")]
+    result = run_query(sql)
 
-    if not partitions:
-        logger.info("Incremental sync: no new partitions found")
+    if not result["rows"]:
+        logger.info("Incremental sync: no new rows found")
         return 0
 
-    logger.info("Incremental sync: %d partitions to fetch: %s ... %s",
-                len(partitions), partitions[0], partitions[-1])
-
-    total = 0
-    for pt in partitions:
-        sql = f"""
-            SELECT project_id, user_id, prompt, caption, name,
-                   llm_keyword, llm_object, llm_category, llm_style,
-                   llm_color, llm_use_case, llm_height, from_type,
-                   status, visibility, display_image,
-                   like_count, collect_count, score,
-                   created_at, pt
-            FROM silver.clean_tripo_project
-            WHERE prompt IS NOT NULL AND prompt != ''
-              AND pt = '{pt}'
-        """
-        result = run_query(sql)
-        if result["rows"]:
-            cache_service.save_prompts(result["rows"])
-            total += result["row_count"]
-            logger.info("Fetched pt=%s: %d rows (total so far: %d)", pt, result["row_count"], total)
-
-    logger.info("Incremental sync complete: %d total rows across %d partitions", total, len(partitions))
+    cache_service.save_prompts(result["rows"])
+    total = result["row_count"]
+    logger.info("Incremental sync complete: %d rows fetched", total)
     return total
 
 

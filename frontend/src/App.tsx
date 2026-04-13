@@ -18,6 +18,7 @@ import UserRetentionPage from './pages/UserRetentionPage';
 import UserPathPage from './pages/UserPathPage';
 import TopicAnalysisPage from './pages/TopicAnalysisPage';
 import TemplateMarketPage from './pages/TemplateMarketPage';
+import PipelineRunsPage from './pages/PipelineRunsPage';
 
 // Cache persisted to localStorage — survives browser refresh.
 // maxAge: 30 minutes. staleTime: 5 minutes (tab switches reuse cache).
@@ -72,6 +73,7 @@ function App() {
               <Route path="/topic-analysis" element={<TopicAnalysisPage />} />
               <Route path="/topic-analysis/:topicId" element={<TopicAnalysisPage />} />
               <Route path="/templates" element={<TemplateMarketPage />} />
+              <Route path="/pipeline-runs" element={<PipelineRunsPage />} />
             </Route>
           </Routes>
         </BrowserRouter>

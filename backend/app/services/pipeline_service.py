@@ -2,6 +2,7 @@
 
 import logging
 import threading
+from contextlib import contextmanager
 
 from app.services import (
     cache_service, athena_service, nlp_service, llm_service,
@@ -16,12 +17,10 @@ _lock = threading.Lock()
 
 
 def start_pipeline() -> int:
-    """Start the analysis pipeline in a background thread (uses existing cache data)."""
     return _start(incremental_sync=False)
 
 
 def start_sync_and_analyze() -> int:
-    """Incremental sync from Athena then run full analysis pipeline."""
     return _start(incremental_sync=True)
 
 
@@ -29,17 +28,13 @@ def _start(incremental_sync: bool) -> int:
     global _current_run_id
 
     with _lock:
-        # Check in-memory run first
         if _current_run_id:
             run = cache_service.get_analysis_run(_current_run_id)
             if run and run["status"] == "running":
                 return _current_run_id
 
-        # Also check DB for a running run (handles backend restart mid-pipeline)
         latest = cache_service.get_latest_analysis_run()
         if latest and latest["status"] == "running":
-            # A previous run is still marked running in DB but we lost the thread.
-            # Mark it as failed so we can start fresh.
             cache_service.update_analysis_run(
                 latest["id"], status="failed",
                 error="Interrupted by backend restart"
@@ -56,184 +51,213 @@ def _start(incremental_sync: bool) -> int:
 
 
 def get_status() -> dict:
-    """Get current pipeline status."""
     if _current_run_id:
         run = cache_service.get_analysis_run(_current_run_id)
         if run:
             return run
-    # Check latest run
     latest = cache_service.get_latest_analysis_run()
     return latest or {"status": "no_runs", "progress": 0}
 
 
+@contextmanager
+def _step(run_id: int, name: str, progress: float, phase: str = "analysis",
+          phase_progress: float = None):
+    """Context manager: records step start/end, duration, and handles errors."""
+    _update(run_id, "running", name, progress, phase=phase,
+            phase_progress=phase_progress if phase_progress is not None else progress)
+    step_id = cache_service.start_run_step(run_id, name)
+    result_holder = {"rows": None, "detail": None, "error": None}
+    try:
+        yield result_holder
+        cache_service.finish_run_step(
+            step_id, status="completed",
+            rows_affected=result_holder["rows"],
+            detail=result_holder["detail"],
+        )
+    except Exception as e:
+        result_holder["error"] = str(e)
+        cache_service.finish_run_step(step_id, status="failed", detail=str(e))
+        logger.warning("[Run %d] Step '%s' failed: %s", run_id, name, e)
+
+
 def _run_pipeline(run_id: int, incremental_sync: bool = False):
-    """Execute the full analysis pipeline."""
     global _current_run_id
     try:
+        # ── Phase 1: 数据同步 ──
         if incremental_sync:
-            # ── Phase 1: 数据同步 ──
-            _update(run_id, "running", "正在增量同步最新数据...", 0.0,
-                    phase="sync", phase_progress=0.1)
-            new_count = athena_service.fetch_incremental()
-            logger.info("Incremental sync: %d new rows", new_count)
-            _update(run_id, "running", f"同步完成，新增 {new_count} 条数据", 0.0,
+            with _step(run_id, "增量同步数据", 0.0, phase="sync", phase_progress=0.1) as s:
+                new_count = athena_service.fetch_incremental()
+                s["rows"] = new_count
+                s["detail"] = f"新增 {new_count} 条数据"
+            _update(run_id, "running", f"同步完成，新增 {new_count} 条", 0.0,
                     phase="sync", phase_progress=1.0)
         else:
             count = cache_service.get_prompt_count()
             if count == 0:
-                _update(run_id, "running", "Fetching data from Athena", 0.0,
-                        phase="sync", phase_progress=0.1)
-                row_count = athena_service.fetch_and_cache_prompts()
-                logger.info("Fetched %d prompts from Athena", row_count)
-                _update(run_id, "running", "同步完成", 0.0,
-                        phase="sync", phase_progress=1.0)
+                with _step(run_id, "从 Athena 拉取数据", 0.0, phase="sync", phase_progress=0.1) as s:
+                    row_count = athena_service.fetch_and_cache_prompts()
+                    s["rows"] = row_count
+                _update(run_id, "running", "同步完成", 0.0, phase="sync", phase_progress=1.0)
             else:
-                _update(run_id, "running", "使用已缓存数据", 0.0,
-                        phase="sync", phase_progress=1.0)
+                with _step(run_id, "使用已缓存数据", 0.0, phase="sync", phase_progress=1.0) as s:
+                    s["rows"] = count
+                    s["detail"] = f"缓存中已有 {count} 条数据"
 
         # ── Phase 2: 数据分析 ──
-        _update(run_id, "running", "加载数据", 0.05, phase="analysis", phase_progress=0.02)
-        df = cache_service.get_prompts_df()
-        df = df[df["prompt"].fillna("").str.strip() != ""].reset_index(drop=True)
-        logger.info("Pipeline working with %d non-empty prompts", len(df))
+        with _step(run_id, "加载数据", 0.05, phase_progress=0.02) as s:
+            df = cache_service.get_prompts_df()
+            df = df[df["prompt"].fillna("").str.strip() != ""].reset_index(drop=True)
+            s["rows"] = len(df)
+            s["detail"] = f"有效 Prompt {len(df)} 条"
 
         if df.empty:
-            _update(run_id, "completed", "No data found", 1.0, phase="analysis", phase_progress=1.0)
+            _update(run_id, "completed", "无数据", 1.0, phase="analysis", phase_progress=1.0)
             return
 
-        _update(run_id, "running", "语言检测", 0.10, phase="analysis", phase_progress=0.06)
-        lang_result = nlp_service.analyze_languages(df)
-        cache_service.save_analysis_result(run_id, "language", lang_result)
+        with _step(run_id, "语言检测", 0.10, phase_progress=0.06) as s:
+            lang_result = nlp_service.analyze_languages(df)
+            cache_service.save_analysis_result(run_id, "language", lang_result)
+            dist = lang_result.get("distribution", [])
+            s["rows"] = sum(d.get("count", 0) for d in dist)
+            s["detail"] = f"检测到 {len(dist)} 种语言"
 
-        _update(run_id, "running", "文本统计", 0.18, phase="analysis", phase_progress=0.12)
-        stats_result = nlp_service.analyze_text_statistics(df)
-        cache_service.save_analysis_result(run_id, "text_stats", stats_result)
+        with _step(run_id, "文本统计", 0.18, phase_progress=0.12) as s:
+            stats_result = nlp_service.analyze_text_statistics(df)
+            cache_service.save_analysis_result(run_id, "text_stats", stats_result)
+            s["rows"] = len(df)
+            avg_len = stats_result.get("avg_length", 0)
+            s["detail"] = f"平均长度 {avg_len:.0f} 字符"
 
-        _update(run_id, "running", "关键词提取 (TF-IDF)", 0.26, phase="analysis", phase_progress=0.20)
-        kw_result = nlp_service.extract_keywords(df)
-        cache_service.save_analysis_result(run_id, "keywords", {"keywords": kw_result["keywords"]})
+        with _step(run_id, "关键词提取 (TF-IDF)", 0.26, phase_progress=0.20) as s:
+            kw_result = nlp_service.extract_keywords(df)
+            cache_service.save_analysis_result(run_id, "keywords", {"keywords": kw_result["keywords"]})
+            s["rows"] = len(kw_result.get("keywords", []))
+            s["detail"] = f"提取 {s['rows']} 个关键词"
 
-        _update(run_id, "running", "主题建模 (LDA + t-SNE)", 0.36, phase="analysis", phase_progress=0.30)
-        topic_result = nlp_service.build_topic_model(
-            kw_result["sample_df"], kw_result["tfidf_matrix"], kw_result["feature_names"]
-        )
-        cache_service.save_analysis_result(run_id, "topics", topic_result)
+        with _step(run_id, "主题建模 (LDA + t-SNE)", 0.36, phase_progress=0.30) as s:
+            topic_result = nlp_service.build_topic_model(
+                kw_result["sample_df"], kw_result["tfidf_matrix"], kw_result["feature_names"]
+            )
+            cache_service.save_analysis_result(run_id, "topics", topic_result)
+            s["rows"] = topic_result.get("n_topics", 0)
+            s["detail"] = f"发现 {s['rows']} 个主题"
 
-        _update(run_id, "running", "趋势分析", 0.44, phase="analysis", phase_progress=0.38)
-        trend_result = nlp_service.analyze_trends(df)
-        cache_service.save_analysis_result(run_id, "trends", trend_result)
+        with _step(run_id, "趋势分析", 0.44, phase_progress=0.38) as s:
+            trend_result = nlp_service.analyze_trends(df)
+            cache_service.save_analysis_result(run_id, "trends", trend_result)
+            s["rows"] = len(df)
 
-        _update(run_id, "running", "意图分析", 0.50, phase="analysis", phase_progress=0.44)
-        try:
+        with _step(run_id, "意图分析", 0.50, phase_progress=0.44) as s:
             from app.services import intent_v2_service
             intent_v2_result = intent_v2_service.compute_intent_distribution(sample_limit=15000)
             cache_service.save_analysis_result(run_id, "intents_v2", intent_v2_result)
-        except Exception as e:
-            logger.warning("Intent v2 skipped: %s", e)
+            s["rows"] = intent_v2_result.get("sample_size", 0)
+            top = (intent_v2_result.get("distribution") or [{}])[0]
+            s["detail"] = f"Top: {top.get('label','')} {top.get('percentage',0)}%"
 
-        _update(run_id, "running", "意图分类 (Claude API)", 0.52, phase="analysis", phase_progress=0.46)
-        try:
-            intent_result = llm_service.classify_intents(df)
-            cache_service.save_analysis_result(run_id, "intents", intent_result)
-        except Exception as e:
-            logger.warning("Intent classification skipped: %s", e)
-            cache_service.save_analysis_result(run_id, "intents", {"distribution": [], "error": str(e)})
+        with _step(run_id, "意图分类 (Claude API)", 0.52, phase_progress=0.46) as s:
+            try:
+                intent_result = llm_service.classify_intents(df)
+                cache_service.save_analysis_result(run_id, "intents", intent_result)
+                s["rows"] = len(intent_result.get("distribution", []))
+            except Exception as e:
+                cache_service.save_analysis_result(run_id, "intents", {"distribution": [], "error": str(e)})
+                s["detail"] = f"跳过: {e}"
 
-        _update(run_id, "running", "质量评估 (Claude API)", 0.58, phase="analysis", phase_progress=0.52)
-        try:
-            quality_result = llm_service.assess_quality(df)
-            cache_service.save_analysis_result(run_id, "quality", quality_result)
-        except Exception as e:
-            logger.warning("Quality assessment skipped: %s", e)
-            cache_service.save_analysis_result(run_id, "quality", {"scores": [], "error": str(e)})
+        with _step(run_id, "质量评估 (Claude API)", 0.58, phase_progress=0.52) as s:
+            try:
+                quality_result = llm_service.assess_quality(df)
+                cache_service.save_analysis_result(run_id, "quality", quality_result)
+                s["rows"] = len(quality_result.get("scores", []))
+            except Exception as e:
+                cache_service.save_analysis_result(run_id, "quality", {"scores": [], "error": str(e)})
+                s["detail"] = f"跳过: {e}"
 
-        _update(run_id, "running", "主题总结 (Claude API)", 0.62, phase="analysis", phase_progress=0.56)
-        try:
-            summary = cache_service.get_summary()
-            categories = cache_service.get_category_distributions()
-            theme = llm_service.generate_theme_summary(summary, categories, kw_result["keywords"][:20])
-            cache_service.save_analysis_result(run_id, "theme_summary", {"text": theme})
-        except Exception as e:
-            logger.warning("Theme summary skipped: %s", e)
+        with _step(run_id, "主题总结 (Claude API)", 0.62, phase_progress=0.56) as s:
+            try:
+                summary = cache_service.get_summary()
+                categories = cache_service.get_category_distributions()
+                theme = llm_service.generate_theme_summary(summary, categories, kw_result["keywords"][:20])
+                cache_service.save_analysis_result(run_id, "theme_summary", {"text": theme})
+                s["detail"] = "生成成功"
+            except Exception as e:
+                s["detail"] = f"跳过: {e}"
 
-        _update(run_id, "running", "质量评估 v2 (Claude API)", 0.65, phase="analysis", phase_progress=0.60)
-        try:
-            quality_v2 = llm_service.assess_quality_v2(df)
-            cache_service.save_analysis_result(run_id, "quality_v2", quality_v2)
-        except Exception as e:
-            logger.warning("Quality v2 skipped: %s", e)
+        with _step(run_id, "质量评估 v2 (Claude API)", 0.65, phase_progress=0.60) as s:
+            try:
+                quality_v2 = llm_service.assess_quality_v2(df)
+                cache_service.save_analysis_result(run_id, "quality_v2", quality_v2)
+                s["rows"] = quality_v2.get("sample_size", 0)
+            except Exception as e:
+                s["detail"] = f"跳过: {e}"
 
-        _update(run_id, "running", "用户分层", 0.70, phase="analysis", phase_progress=0.65)
-        try:
-            user_service.compute_user_segments(days=90)
-        except Exception as e:
-            logger.warning("User segmentation skipped: %s", e)
+        with _step(run_id, "用户分层", 0.70, phase_progress=0.65) as s:
+            try:
+                seg = user_service.compute_user_segments(days=90)
+                s["rows"] = seg.get("total_users", 0)
+                segs = seg.get("segments", {})
+                s["detail"] = "  ".join(f"{k}:{v}" for k, v in segs.items())
+            except Exception as e:
+                s["detail"] = f"跳过: {e}"
 
-        _update(run_id, "running", "向量索引 (FAISS)", 0.75, phase="analysis", phase_progress=0.70)
-        try:
-            n_indexed = embedding_service.build_index()
-            logger.info("FAISS index built with %d vectors", n_indexed)
-        except Exception as e:
-            logger.warning("Embedding index skipped: %s", e)
+        with _step(run_id, "向量索引 (FAISS)", 0.75, phase_progress=0.70) as s:
+            try:
+                n_indexed = embedding_service.build_index()
+                s["rows"] = n_indexed
+                s["detail"] = f"索引 {n_indexed} 条向量"
+            except Exception as e:
+                s["detail"] = f"跳过: {e}"
 
-        _update(run_id, "running", "效果分析", 0.80, phase="analysis", phase_progress=0.76)
-        try:
-            effect_service.compute_effect_analysis("like_count")
-        except Exception as e:
-            logger.warning("Effect analysis skipped: %s", e)
+        with _step(run_id, "效果分析 (like_count)", 0.80, phase_progress=0.76) as s:
+            try:
+                eff = effect_service.compute_effect_analysis("like_count")
+                s["rows"] = eff.get("total_prompts", 0)
+                s["detail"] = f"爆款 {len(eff.get('hit_prompts', []))} 条，显著特征 {eff.get('significant_count', 0)} 个"
+            except Exception as e:
+                s["detail"] = f"跳过: {e}"
 
-        _update(run_id, "running", "留存分析", 0.84, phase="analysis", phase_progress=0.80)
-        try:
-            retention_service.compute_retention()
-        except Exception as e:
-            logger.warning("Retention analysis skipped: %s", e)
+        with _step(run_id, "留存分析", 0.84, phase_progress=0.80) as s:
+            try:
+                ret = retention_service.compute_retention()
+                s["rows"] = len(ret.get("cohorts", []))
+                s["detail"] = f"{s['rows']} 个留存队列"
+            except Exception as e:
+                s["detail"] = f"跳过: {e}"
 
-        _update(run_id, "running", "创作路径分析", 0.87, phase="analysis", phase_progress=0.84)
-        try:
-            path_service.compute_user_paths()
-        except Exception as e:
-            logger.warning("User path analysis skipped: %s", e)
+        with _step(run_id, "创作路径分析", 0.87, phase_progress=0.84) as s:
+            try:
+                paths = path_service.compute_user_paths()
+                s["rows"] = len(paths.get("links", []))
+                s["detail"] = f"{len(paths.get('nodes', []))} 节点 / {s['rows']} 路径"
+            except Exception as e:
+                s["detail"] = f"跳过: {e}"
 
-        _update(run_id, "running", "BERTopic 主题模型", 0.90, phase="analysis", phase_progress=0.87)
-        try:
-            bertopic_service.compute_bertopic()
-        except Exception as e:
-            logger.warning("BERTopic skipped: %s", e)
+        with _step(run_id, "BERTopic 主题模型", 0.90, phase_progress=0.87) as s:
+            try:
+                bt = bertopic_service.compute_bertopic()
+                s["rows"] = bt.get("n_topics", 0)
+                s["detail"] = f"{s['rows']} 个主题 (model={bt.get('model','-')})"
+            except Exception as e:
+                s["detail"] = f"跳过: {e}"
 
-        _update(run_id, "running", "爆款模板挖掘", 0.93, phase="analysis", phase_progress=0.91)
-        try:
-            template_service.mine_hot_templates()
-        except Exception as e:
-            logger.warning("Template mining skipped: %s", e)
+        with _step(run_id, "爆款模板挖掘", 0.93, phase_progress=0.91) as s:
+            try:
+                tmpl = template_service.mine_hot_templates()
+                s["rows"] = len(tmpl.get("templates", []))
+                s["detail"] = f"挖掘 {s['rows']} 个模板"
+            except Exception as e:
+                s["detail"] = f"跳过: {e}"
 
-        _update(run_id, "running", "多指标效果分析", 0.96, phase="analysis", phase_progress=0.95)
-        try:
-            effect_service.compute_effect_analysis("collect_count")
-            effect_service.compute_effect_analysis("score")
-        except Exception as e:
-            logger.warning("Multi-metric effect analysis skipped: %s", e)
-
-        _update(run_id, "running", "收尾", 0.99, phase="analysis", phase_progress=0.99)
-
-        # pgvector / Redis (optional, skip silently)
-        try:
-            from app.services import pg_service
-            if pg_service.is_available():
-                pg_service.init_pgvector()
-        except Exception:
-            pass
-        try:
-            from app.services import redis_cache
-            if redis_cache.is_available():
-                for key in ["retention", "user_paths", "bertopic", "hot_templates"]:
-                    result = cache_service.get_analysis_result(key)
-                    if result:
-                        redis_cache.set(f"analysis:{key}", result)
-        except Exception:
-            pass
+        with _step(run_id, "多指标效果分析", 0.96, phase_progress=0.95) as s:
+            try:
+                effect_service.compute_effect_analysis("collect_count")
+                effect_service.compute_effect_analysis("score")
+                s["detail"] = "collect_count / score 完成"
+            except Exception as e:
+                s["detail"] = f"跳过: {e}"
 
         _update(run_id, "completed", "分析完成", 1.0, phase="analysis", phase_progress=1.0)
-        logger.info("Pipeline completed successfully for run %d", run_id)
+        logger.info("Pipeline completed for run %d", run_id)
 
     except Exception as e:
         logger.error("Pipeline failed: %s", e, exc_info=True)

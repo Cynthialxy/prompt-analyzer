@@ -13,6 +13,7 @@ import {
   ForkOutlined,
   AppstoreOutlined,
   FileTextOutlined,
+  HistoryOutlined,
 } from '@ant-design/icons';
 import { useNavigate, useLocation, Outlet } from 'react-router-dom';
 import {
@@ -67,6 +68,7 @@ const menuItems = [
   { key: '/effects', icon: <ThunderboltOutlined />, label: '效果分析' },
   { key: '/topic-analysis', icon: <AppstoreOutlined />, label: '主题分析' },
   { key: '/templates', icon: <FileTextOutlined />, label: '爆款模板' },
+  { key: '/pipeline-runs', icon: <HistoryOutlined />, label: '运行历史' },
 ];
 
 const STEP_LABELS: Record<string, string> = {

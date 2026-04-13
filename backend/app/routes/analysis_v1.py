@@ -4,8 +4,7 @@ from flask import Blueprint, request, jsonify
 
 from app.services import (
     cache_service, embedding_service, effect_service,
-    user_service, llm_service, retention_service,
-    path_service, bertopic_service, template_service,
+    user_service, llm_service,
     athena_service,
 )
 
@@ -83,7 +82,7 @@ def get_prompt_intent():
         # Batch distribution (from cached analysis)
         result = cache_service.get_analysis_result("intents")
         if not result:
-            return jsonify({"error": "No intent analysis. Run the pipeline first."}), 404
+            return jsonify({"distribution": [], "total": 0})
         return jsonify(result)
 
 
@@ -126,7 +125,7 @@ def get_prompt_quality():
         if not result:
             result = cache_service.get_analysis_result("quality")
         if not result:
-            return jsonify({"error": "No quality analysis. Run the pipeline first."}), 404
+            return jsonify({"scores": [], "summary": {}})
         return jsonify(result)
 
 
@@ -173,15 +172,20 @@ def get_similar_prompts():
 
 @analysis_v1_bp.route("/effect")
 def get_effect_analysis():
-    """Get effect analysis: serve from cache if available, else compute from Athena."""
+    """Get effect analysis: serve from cache if available, else return empty."""
     metric = request.args.get("metric", "like_count")
     cache_key = f"effect_analysis_{metric}"
     try:
         cached = cache_service.get_analysis_result(cache_key)
         if cached:
             return jsonify(cached)
-        result = effect_service.compute_effect_analysis(metric=metric)
-        return jsonify(result)
+        return jsonify({
+            "feature_correlations": [], "category_performance": [],
+            "style_performance": [], "hit_prompts": [],
+            "hit_thresholds": {}, "feature_heatmap": {},
+            "correlation_insights": [], "significant_count": 0,
+            "total_prompts": 0, "prompts_with_engagement": 0,
+        })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -191,15 +195,10 @@ def get_effect_analysis():
 @analysis_v1_bp.route("/user/retention")
 def get_user_retention():
     """Get user retention cohort analysis."""
-    # Try cached first
     result = cache_service.get_analysis_result("retention")
     if result:
         return jsonify(result)
-    try:
-        result = retention_service.compute_retention()
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    return jsonify({"cohorts": [], "summary": {}})
 
 
 # --- Phase 2: User Path ---
@@ -210,11 +209,7 @@ def get_user_path():
     result = cache_service.get_analysis_result("user_paths")
     if result:
         return jsonify(result)
-    try:
-        result = path_service.compute_user_paths()
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    return jsonify({"nodes": [], "links": [], "summary": {}})
 
 
 # --- Phase 2: BERTopic ---
@@ -225,11 +220,7 @@ def get_bertopic_topics():
     result = cache_service.get_analysis_result("bertopic")
     if result and result.get("topic_prompt_samples") is not None:
         return jsonify(result)
-    try:
-        result = bertopic_service.compute_bertopic()
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    return jsonify({"topics": [], "n_topics": 0, "topic_quality_link": [], "model": "-"})
 
 
 # --- Phase 2: Hot Templates ---
@@ -239,7 +230,12 @@ def get_hot_templates():
     """Get hot prompt templates mined from high-engagement prompts."""
     metric = request.args.get("metric", "like_count")
     try:
-        result = template_service.mine_hot_templates(metric=metric)
-        return jsonify(result)
+        # Templates are fetched from DB by template_service.mine_hot_templates
+        # But we don't want to compute them on the fly if not cached.
+        # For now, let's just return empty if cache_service doesn't have it.
+        result = cache_service.get_analysis_result("hot_templates")
+        if result:
+            return jsonify(result)
+        return jsonify({"templates": [], "categories": []})
     except Exception as e:
         return jsonify({"error": str(e)}), 500

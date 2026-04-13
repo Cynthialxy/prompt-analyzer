@@ -26,7 +26,8 @@ const GC_TIME = 10 * 60 * 1000;
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
-      retry: 1,
+      retry: 0,
+      retryOnMount: true,
       refetchOnWindowFocus: false,
       staleTime: STALE_TIME,
       gcTime: GC_TIME,

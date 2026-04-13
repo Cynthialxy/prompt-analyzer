@@ -19,7 +19,7 @@ def get_topics():
     """Get topic clustering results."""
     result = cache_service.get_analysis_result("topics")
     if not result:
-        return jsonify({"error": "No topic analysis results. Run the pipeline first."}), 404
+        return jsonify({"topics": [], "n_topics": 0})
     return jsonify(result)
 
 
@@ -44,7 +44,7 @@ def get_language():
     quality = cache_service.get_analysis_result("quality")
 
     if not lang:
-        return jsonify({"error": "No language analysis results. Run the pipeline first."}), 404
+        return jsonify({"language": {}, "text_stats": {}, "quality": {}})
 
     # If quality is missing or summary is empty, compute from local data
     if not quality or not quality.get("summary"):
@@ -62,7 +62,7 @@ def get_trends():
     """Get trend analysis results."""
     result = cache_service.get_analysis_result("trends")
     if not result:
-        return jsonify({"error": "No trend analysis results. Run the pipeline first."}), 404
+        return jsonify({"trends": [], "weekly": [], "monthly": []})
     return jsonify(result)
 
 
@@ -71,7 +71,7 @@ def get_keywords():
     """Get extracted keywords."""
     result = cache_service.get_analysis_result("keywords")
     if not result:
-        return jsonify({"error": "No keyword results. Run the pipeline first."}), 404
+        return jsonify({"keywords": []})
     return jsonify(result)
 
 

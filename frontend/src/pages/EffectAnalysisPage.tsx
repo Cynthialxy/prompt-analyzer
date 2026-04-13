@@ -200,9 +200,6 @@ const EffectAnalysisPage: React.FC = () => {
             <span style={{ marginRight: 8 }}>效果指标：</span>
             <Select value={metric} onChange={setMetric} style={{ width: 160 }}
               options={Object.entries(METRIC_LABELS).map(([k, v]) => ({ label: v, value: k }))} />
-            <Button icon={<ReloadOutlined />} onClick={handleRefresh} loading={isLoading} style={{ marginLeft: 8 }}>
-              刷新
-            </Button>
           </Col>
           <Col flex="auto">
             <Text type="secondary">

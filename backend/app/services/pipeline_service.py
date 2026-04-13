@@ -123,6 +123,14 @@ def _run_pipeline(run_id: int, incremental_sync: bool = False):
         trend_result = nlp_service.analyze_trends(df)
         cache_service.save_analysis_result(run_id, "trends", trend_result)
 
+        _update(run_id, "running", "意图分析", 0.50, phase="analysis", phase_progress=0.44)
+        try:
+            from app.services import intent_v2_service
+            intent_v2_result = intent_v2_service.compute_intent_distribution(sample_limit=15000)
+            cache_service.save_analysis_result(run_id, "intents_v2", intent_v2_result)
+        except Exception as e:
+            logger.warning("Intent v2 skipped: %s", e)
+
         _update(run_id, "running", "意图分类 (Claude API)", 0.52, phase="analysis", phase_progress=0.46)
         try:
             intent_result = llm_service.classify_intents(df)

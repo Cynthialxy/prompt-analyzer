@@ -28,7 +28,11 @@ def get_intents():
     """Get USER DEMAND INTENT distribution (v2: why users generate, not what)."""
     from app.services import intent_v2_service
     try:
+        cached = cache_service.get_analysis_result("intents_v2")
+        if cached:
+            return jsonify(cached)
         result = intent_v2_service.compute_intent_distribution(sample_limit=15000)
+        cache_service.save_analysis_result(0, "intents_v2", result)
         return jsonify(result)
     except Exception as e:
         import traceback

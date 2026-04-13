@@ -42,21 +42,6 @@ def init_db():
                 fetched_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
 
-            CREATE TABLE IF NOT EXISTS run_steps (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                run_id INTEGER NOT NULL,
-                step_name TEXT NOT NULL,
-                status TEXT DEFAULT 'pending',
-                started_at TEXT,
-                completed_at TEXT,
-                duration_sec REAL,
-                rows_affected INTEGER,
-                detail TEXT,
-                FOREIGN KEY (run_id) REFERENCES analysis_runs(id)
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_run_steps_run_id ON run_steps(run_id);
-
             CREATE TABLE IF NOT EXISTS analysis_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 started_at TEXT,
@@ -543,56 +528,6 @@ def get_latest_analysis_run() -> dict:
             "SELECT * FROM analysis_runs ORDER BY id DESC LIMIT 1"
         ).fetchone()
         return dict(row) if row else None
-
-
-def get_analysis_runs(limit: int = 20) -> list[dict]:
-    """Return recent analysis runs (newest first)."""
-    with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT * FROM analysis_runs ORDER BY id DESC LIMIT ?", (limit,)
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-
-def start_run_step(run_id: int, step_name: str) -> int:
-    """Record a step as started, return step id."""
-    with get_conn() as conn:
-        cursor = conn.execute(
-            "INSERT INTO run_steps (run_id, step_name, status, started_at) VALUES (?, ?, 'running', ?)",
-            (run_id, step_name, datetime.now().isoformat())
-        )
-        return cursor.lastrowid
-
-
-def finish_run_step(step_id: int, status: str = "completed",
-                    rows_affected: int = None, detail: str = None):
-    """Mark a step as completed or failed."""
-    now = datetime.now().isoformat()
-    with get_conn() as conn:
-        row = conn.execute("SELECT started_at FROM run_steps WHERE id = ?", (step_id,)).fetchone()
-        duration = None
-        if row and row["started_at"]:
-            try:
-                started = datetime.fromisoformat(row["started_at"])
-                duration = round((datetime.now() - started).total_seconds(), 2)
-            except Exception:
-                pass
-        conn.execute(
-            """UPDATE run_steps
-               SET status = ?, completed_at = ?, duration_sec = ?,
-                   rows_affected = ?, detail = ?
-               WHERE id = ?""",
-            (status, now, duration, rows_affected, detail, step_id)
-        )
-
-
-def get_run_steps(run_id: int) -> list[dict]:
-    """Return all steps for a given run."""
-    with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT * FROM run_steps WHERE run_id = ? ORDER BY id ASC", (run_id,)
-        ).fetchall()
-        return [dict(r) for r in rows]
 
 
 def save_analysis_result(run_id: int, result_type: str, data: dict):

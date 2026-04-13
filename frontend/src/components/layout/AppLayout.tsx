@@ -13,7 +13,6 @@ import {
   ForkOutlined,
   AppstoreOutlined,
   FileTextOutlined,
-  HistoryOutlined,
 } from '@ant-design/icons';
 import { useNavigate, useLocation, Outlet } from 'react-router-dom';
 import {
@@ -68,7 +67,6 @@ const menuItems = [
   { key: '/effects', icon: <ThunderboltOutlined />, label: '效果分析' },
   { key: '/topic-analysis', icon: <AppstoreOutlined />, label: '主题分析' },
   { key: '/templates', icon: <FileTextOutlined />, label: '爆款模板' },
-  { key: '/pipeline-runs', icon: <HistoryOutlined />, label: '运行历史' },
 ];
 
 const STEP_LABELS: Record<string, string> = {
@@ -212,11 +210,11 @@ const AppLayout: React.FC = () => {
           </div>
           <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
             {syncing && (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 320 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 360 }}>
                 <Spin size="small" />
                 <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: 11, color: '#666', marginBottom: 4 }}>
-                    {phase === 'sync' ? '数据同步中…' : `数据分析中… ${stepLabel ? `· ${stepLabel}` : ''}`}
+                  <div style={{ fontSize: 12, color: '#1677ff', marginBottom: 4, fontWeight: 500 }}>
+                    {pipelineStatus?.current_step || (phase === 'sync' ? '正在同步数据...' : '正在分析...')}
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
                     <span style={{ fontSize: 10, color: '#888', width: 48, flexShrink: 0 }}>数据同步</span>

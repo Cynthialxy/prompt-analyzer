@@ -117,8 +117,8 @@ const UserPathPage: React.FC = () => {
               scroll={{ y: 400 }}
               columns={[
                 { title: '类别', dataIndex: 'category', key: 'cat', render: (v: string) => <Tag color="blue">{v}</Tag> },
-                { title: '流入', dataIndex: 'in', key: 'in', sorter: (a: { in: number }, b: { in: number }) => a.in - b.in },
-                { title: '流出', dataIndex: 'out', key: 'out', sorter: (a: { out: number }, b: { out: number }) => a.out - b.out },
+                { title: '流入', dataIndex: 'in', key: 'in', sorter: (a: any, b: any) => a.in - b.in },
+                { title: '流出', dataIndex: 'out', key: 'out', sorter: (a: any, b: any) => a.out - b.out },
                 { title: '停留', dataIndex: 'stay', key: 'stay' },
               ]}
             />

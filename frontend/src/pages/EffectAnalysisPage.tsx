@@ -37,8 +37,8 @@ const EffectAnalysisPage: React.FC = () => {
   const catPerf = data?.category_performance || [];
   const stylePerf = data?.style_performance || [];
   const hitPrompts = data?.hit_prompts || [];
-  const thresholds = data?.hit_thresholds?.[metric] || {};
-  const heatmap = data?.feature_heatmap || {};
+  const thresholds: Record<string, number> = data?.hit_thresholds?.[metric] || {};
+  const heatmap: Record<string, any> = data?.feature_heatmap || {};
   const sigCount = data?.significant_count || 0;
   const corrSampleSize = data?.correlation_sample_size || 0;
 

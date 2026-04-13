@@ -69,34 +69,6 @@ const menuItems = [
   { key: '/templates', icon: <FileTextOutlined />, label: '爆款模板' },
 ];
 
-const STEP_LABELS: Record<string, string> = {
-  '正在增量同步最新数据...': '增量同步数据',
-  '加载数据...': '加载数据',
-  'Detecting languages': '语言检测',
-  'Computing text statistics': '文本统计',
-  'Extracting keywords (TF-IDF)': '关键词提取',
-  'Building topic model (LDA + t-SNE)': '主题建模',
-  'Analyzing trends': '趋势分析',
-  'Classifying intents (Claude API)': '意图分类',
-  'Assessing prompt quality (Claude API)': '质量评估',
-  'Generating theme summary': '主题总结',
-  'Computing user segments': '用户分层',
-  'Building embedding index (FAISS)': '向量索引',
-  'Running effect analysis': '效果分析',
-  'Computing user retention cohorts': '留存分析',
-  'Analyzing user creation paths': '创作路径',
-  'Training BERTopic model': '主题模型',
-  'Mining hot prompt templates': '爆款模板',
-  'Running effect analysis (multi-metric)': '多指标效果分析',
-  'Finalizing': '完成收尾',
-};
-
-function localizeStep(step: string): string {
-  for (const [key, val] of Object.entries(STEP_LABELS)) {
-    if (step.includes(key)) return val;
-  }
-  return step;
-}
 
 const AppLayout: React.FC = () => {
   const navigate = useNavigate();
@@ -154,10 +126,6 @@ const AppLayout: React.FC = () => {
 
   const syncProgress = phase === 'sync' ? Math.round(phaseProgress * 100) : 100;
   const analysisProgress = phase === 'analysis' ? Math.round(phaseProgress * 100) : (phase === 'sync' ? 0 : 100);
-  const stepLabel = pipelineStatus?.current_step
-    ? localizeStep(pipelineStatus.current_step)
-    : '';
-
   return (
     <Layout style={{ minHeight: '100vh' }}>
       <Sider

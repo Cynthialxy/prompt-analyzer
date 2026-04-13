@@ -1,10 +1,8 @@
 import React from 'react';
-import { Row, Col, Card, Alert, Typography, Statistic } from 'antd';
+import { Row, Col, Card, Alert } from 'antd';
 import EChartsWrapper from '../components/charts/EChartsWrapper';
 import KpiCard from '../components/common/KpiCard';
 import { useRetention } from '../hooks/useAnalysisData';
-
-const { Text } = Typography;
 
 const UserRetentionPage: React.FC = () => {
   const { data, isLoading } = useRetention();

@@ -19,7 +19,7 @@ const TrendPage: React.FC = () => {
   const wordCloudRef = useRef<HTMLDivElement>(null);
 
   // Daily volume chart
-  const dailyData = (trends?.daily_counts || []).map(d => ({
+  const dailyData = (trends?.daily_counts || []).map((d: Record<string, any>) => ({
     date: formatDate(d.pt || d.date),
     count: d.count,
   }));
@@ -130,7 +130,8 @@ const TrendPage: React.FC = () => {
   }, [trends?.word_cloud]);
 
   // Trending keywords table
-  const keywordColumns = [
+  type KeywordRow = { keyword: string; recent_count: number; previous_count: number; direction: string; momentum: number };
+  const keywordColumns: import('antd').TableColumnsType<KeywordRow> = [
     {
       title: '关键词',
       dataIndex: 'keyword',

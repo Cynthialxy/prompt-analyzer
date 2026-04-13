@@ -174,7 +174,7 @@ def get_similar_prompts():
 def get_effect_analysis():
     """Get effect analysis: serve from cache if available, else return empty."""
     metric = request.args.get("metric", "like_count")
-    cache_key = f"effect_analysis_{metric}"
+    cache_key = f"effect_{metric}"
     try:
         cached = cache_service.get_analysis_result(cache_key)
         if cached:
@@ -218,7 +218,7 @@ def get_user_path():
 def get_bertopic_topics():
     """Get BERTopic analysis results."""
     result = cache_service.get_analysis_result("bertopic")
-    if result and result.get("topic_prompt_samples") is not None:
+    if result and result.get("topics"):
         return jsonify(result)
     return jsonify({"topics": [], "n_topics": 0, "topic_quality_link": [], "model": "-"})
 

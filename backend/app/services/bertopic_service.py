@@ -42,7 +42,9 @@ def compute_bertopic() -> dict:
     """
     if not is_available():
         logger.warning("BERTopic unavailable (missing dependencies), falling back to simple clustering")
-        return _fallback_clustering()
+        result = _fallback_clustering()
+        cache_service.save_analysis_result(0, "bertopic", result)
+        return result
 
     df = cache_service.get_prompts_df()
     if df.empty:

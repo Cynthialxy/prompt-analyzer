@@ -11,7 +11,9 @@
   },
   "dependencies": {
     "@ant-design/icons": "^6.1.1",
+    "@tanstack/query-sync-storage-persister": "^5.99.0",
     "@tanstack/react-query": "^5.96.2",
+    "@tanstack/react-query-persist-client": "^5.99.0",
     "antd": "^6.3.5",
     "axios": "^1.14.0",
     "dayjs": "^1.11.20",

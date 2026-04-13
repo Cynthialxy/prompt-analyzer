@@ -1,8 +1,7 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Row, Col, Card, Table, Tag, Select, Typography, Alert, List, Button } from 'antd';
-import { ArrowUpOutlined, ArrowDownOutlined, ReloadOutlined } from '@ant-design/icons';
-import { useQueryClient } from '@tanstack/react-query';
+import { Row, Col, Card, Table, Tag, Select, Typography, Alert, List } from 'antd';
+import { ArrowUpOutlined, ArrowDownOutlined } from '@ant-design/icons';
 import EChartsWrapper from '../components/charts/EChartsWrapper';
 import KpiCard from '../components/common/KpiCard';
 import { useEffectAnalysis } from '../hooks/useAnalysisData';
@@ -30,13 +29,8 @@ interface CorrelationItem {
 
 const EffectAnalysisPage: React.FC = () => {
   const navigate = useNavigate();
-  const queryClient = useQueryClient();
   const [metric, setMetric] = useState('like_count');
   const { data, isLoading } = useEffectAnalysis(metric);
-
-  const handleRefresh = () => {
-    queryClient.invalidateQueries({ queryKey: ['effect-analysis'] });
-  };
 
   const correlations: CorrelationItem[] = data?.feature_correlations || [];
   const insights: string[] = data?.correlation_insights || [];

@@ -103,10 +103,19 @@ const AppLayout: React.FC = () => {
   const location = useLocation();
   const [collapsed, setCollapsed] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  // Poll only when syncing; on mount always fetch once to detect in-progress runs.
   const { data: pipelineStatus } = usePipelineStatus(syncing);
   const invalidateCoreData = useInvalidateCoreData();
 
   useGlobalPrefetch();
+
+  // On mount: if a pipeline is already running (e.g. page was refreshed mid-run),
+  // restore the syncing indicator without triggering a new run.
+  React.useEffect(() => {
+    if (pipelineStatus?.status === 'running') {
+      setSyncing(true);
+    }
+  }, [pipelineStatus?.status]);
 
   const handleSync = async () => {
     if (syncing) return;

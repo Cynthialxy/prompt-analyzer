@@ -129,9 +129,12 @@ export const useUserProfile = (userId: string) =>
     enabled: !!userId,
   });
 
-export const usePipelineStatus = (enabled: boolean = false) =>
+export const usePipelineStatus = (polling: boolean = false) =>
   useQuery({
     queryKey: ['pipeline-status'],
     queryFn: fetchPipelineStatus,
-    refetchInterval: enabled ? 3000 : false,
+    // Always fetch once on mount to detect in-progress runs after page refresh.
+    // Poll every 3s only when actively syncing.
+    refetchInterval: polling ? 3000 : false,
+    staleTime: 0,
   });

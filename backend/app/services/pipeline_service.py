@@ -29,10 +29,21 @@ def _start(incremental_sync: bool) -> int:
     global _current_run_id
 
     with _lock:
+        # Check in-memory run first
         if _current_run_id:
             run = cache_service.get_analysis_run(_current_run_id)
             if run and run["status"] == "running":
                 return _current_run_id
+
+        # Also check DB for a running run (handles backend restart mid-pipeline)
+        latest = cache_service.get_latest_analysis_run()
+        if latest and latest["status"] == "running":
+            # A previous run is still marked running in DB but we lost the thread.
+            # Mark it as failed so we can start fresh.
+            cache_service.update_analysis_run(
+                latest["id"], status="failed",
+                error="Interrupted by backend restart"
+            )
 
     run_id = cache_service.save_analysis_run()
     _current_run_id = run_id

@@ -129,6 +129,7 @@ export interface PipelineStatus {
   error?: string;
   started_at?: string;
   completed_at?: string;
+  config_json?: string; // JSON string containing phase and phase_progress
 }
 
 export interface KeywordsData {

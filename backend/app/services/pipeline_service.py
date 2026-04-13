@@ -16,7 +16,16 @@ _lock = threading.Lock()
 
 
 def start_pipeline() -> int:
-    """Start the analysis pipeline in a background thread."""
+    """Start the analysis pipeline in a background thread (uses existing cache data)."""
+    return _start(incremental_sync=False)
+
+
+def start_sync_and_analyze() -> int:
+    """Incremental sync from Athena then run full analysis pipeline."""
+    return _start(incremental_sync=True)
+
+
+def _start(incremental_sync: bool) -> int:
     global _current_run_id
 
     with _lock:
@@ -28,7 +37,9 @@ def start_pipeline() -> int:
     run_id = cache_service.save_analysis_run()
     _current_run_id = run_id
 
-    thread = threading.Thread(target=_run_pipeline, args=(run_id,), daemon=True)
+    thread = threading.Thread(
+        target=_run_pipeline, args=(run_id, incremental_sync), daemon=True
+    )
     thread.start()
     return run_id
 
@@ -44,219 +55,166 @@ def get_status() -> dict:
     return latest or {"status": "no_runs", "progress": 0}
 
 
-def _run_pipeline(run_id: int):
+def _run_pipeline(run_id: int, incremental_sync: bool = False):
     """Execute the full analysis pipeline."""
     global _current_run_id
     try:
-        _update(run_id, "running", "Fetching data from Athena", 0.05)
-        # Step 1: Fetch data
-        count = cache_service.get_prompt_count()
-        if count == 0:
-            row_count = athena_service.fetch_and_cache_prompts()
-            logger.info("Fetched %d prompts from Athena", row_count)
+        if incremental_sync:
+            # ── Phase 1: 数据同步 ──
+            _update(run_id, "running", "正在增量同步最新数据...", 0.0,
+                    phase="sync", phase_progress=0.1)
+            new_count = athena_service.fetch_incremental()
+            logger.info("Incremental sync: %d new rows", new_count)
+            _update(run_id, "running", f"同步完成，新增 {new_count} 条数据", 0.0,
+                    phase="sync", phase_progress=1.0)
         else:
-            logger.info("Using %d cached prompts", count)
+            count = cache_service.get_prompt_count()
+            if count == 0:
+                _update(run_id, "running", "Fetching data from Athena", 0.0,
+                        phase="sync", phase_progress=0.1)
+                row_count = athena_service.fetch_and_cache_prompts()
+                logger.info("Fetched %d prompts from Athena", row_count)
+                _update(run_id, "running", "同步完成", 0.0,
+                        phase="sync", phase_progress=1.0)
+            else:
+                _update(run_id, "running", "使用已缓存数据", 0.0,
+                        phase="sync", phase_progress=1.0)
 
-        _update(run_id, "running", "Loading data", 0.10)
+        # ── Phase 2: 数据分析 ──
+        _update(run_id, "running", "加载数据", 0.05, phase="analysis", phase_progress=0.02)
         df = cache_service.get_prompts_df()
-        # Ensure no empty prompts leak through (single source of truth)
         df = df[df["prompt"].fillna("").str.strip() != ""].reset_index(drop=True)
         logger.info("Pipeline working with %d non-empty prompts", len(df))
 
         if df.empty:
-            _update(run_id, "completed", "No data found", 1.0)
+            _update(run_id, "completed", "No data found", 1.0, phase="analysis", phase_progress=1.0)
             return
 
-        # Step 2: Language detection
-        _update(run_id, "running", "Detecting languages", 0.15)
+        _update(run_id, "running", "语言检测", 0.10, phase="analysis", phase_progress=0.06)
         lang_result = nlp_service.analyze_languages(df)
         cache_service.save_analysis_result(run_id, "language", lang_result)
 
-        # Step 3: Text statistics
-        _update(run_id, "running", "Computing text statistics", 0.25)
+        _update(run_id, "running", "文本统计", 0.18, phase="analysis", phase_progress=0.12)
         stats_result = nlp_service.analyze_text_statistics(df)
         cache_service.save_analysis_result(run_id, "text_stats", stats_result)
 
-        # Step 4: Keyword extraction
-        _update(run_id, "running", "Extracting keywords (TF-IDF)", 0.35)
+        _update(run_id, "running", "关键词提取 (TF-IDF)", 0.26, phase="analysis", phase_progress=0.20)
         kw_result = nlp_service.extract_keywords(df)
-        cache_service.save_analysis_result(run_id, "keywords", {
-            "keywords": kw_result["keywords"]
-        })
+        cache_service.save_analysis_result(run_id, "keywords", {"keywords": kw_result["keywords"]})
 
-        # Step 5: Topic modeling
-        _update(run_id, "running", "Building topic model (LDA + t-SNE)", 0.45)
+        _update(run_id, "running", "主题建模 (LDA + t-SNE)", 0.36, phase="analysis", phase_progress=0.30)
         topic_result = nlp_service.build_topic_model(
-            df, kw_result["tfidf_matrix"], kw_result["feature_names"]
+            kw_result["sample_df"], kw_result["tfidf_matrix"], kw_result["feature_names"]
         )
         cache_service.save_analysis_result(run_id, "topics", topic_result)
 
-        # Step 6: Trend analysis
-        _update(run_id, "running", "Analyzing trends", 0.55)
+        _update(run_id, "running", "趋势分析", 0.44, phase="analysis", phase_progress=0.38)
         trend_result = nlp_service.analyze_trends(df)
         cache_service.save_analysis_result(run_id, "trends", trend_result)
 
-        # Step 7: LLM intent classification
-        _update(run_id, "running", "Classifying intents (Claude API)", 0.65)
+        _update(run_id, "running", "意图分类 (Claude API)", 0.52, phase="analysis", phase_progress=0.46)
         try:
             intent_result = llm_service.classify_intents(df)
             cache_service.save_analysis_result(run_id, "intents", intent_result)
         except Exception as e:
             logger.warning("Intent classification skipped: %s", e)
-            cache_service.save_analysis_result(run_id, "intents", {
-                "distribution": [], "error": str(e)
-            })
+            cache_service.save_analysis_result(run_id, "intents", {"distribution": [], "error": str(e)})
 
-        # Step 8: LLM quality assessment
-        _update(run_id, "running", "Assessing prompt quality (Claude API)", 0.80)
+        _update(run_id, "running", "质量评估 (Claude API)", 0.58, phase="analysis", phase_progress=0.52)
         try:
             quality_result = llm_service.assess_quality(df)
             cache_service.save_analysis_result(run_id, "quality", quality_result)
         except Exception as e:
             logger.warning("Quality assessment skipped: %s", e)
-            cache_service.save_analysis_result(run_id, "quality", {
-                "scores": [], "error": str(e)
-            })
+            cache_service.save_analysis_result(run_id, "quality", {"scores": [], "error": str(e)})
 
-        # Step 9: Theme summary
-        _update(run_id, "running", "Generating theme summary", 0.70)
+        _update(run_id, "running", "主题总结 (Claude API)", 0.62, phase="analysis", phase_progress=0.56)
         try:
             summary = cache_service.get_summary()
             categories = cache_service.get_category_distributions()
-            theme = llm_service.generate_theme_summary(
-                summary, categories, kw_result["keywords"][:20]
-            )
+            theme = llm_service.generate_theme_summary(summary, categories, kw_result["keywords"][:20])
             cache_service.save_analysis_result(run_id, "theme_summary", {"text": theme})
         except Exception as e:
             logger.warning("Theme summary skipped: %s", e)
 
-        # Step 10: User segmentation
-        _update(run_id, "running", "Computing user segments", 0.78)
-        try:
-            user_service.compute_user_segments(days=90)
-        except Exception as e:
-            logger.warning("User segmentation skipped: %s", e)
-
-        # Step 11: Build vector index
-        _update(run_id, "running", "Building embedding index (FAISS)", 0.85)
-        try:
-            n_indexed = embedding_service.build_index()
-            logger.info("FAISS index built with %d vectors", n_indexed)
-        except Exception as e:
-            logger.warning("Embedding index skipped: %s", e)
-
-        # Step 12: Effect analysis
-        _update(run_id, "running", "Running effect analysis", 0.92)
-        try:
-            effect_service.compute_effect_analysis("like_count")
-        except Exception as e:
-            logger.warning("Effect analysis skipped: %s", e)
-
-        # Step 13: Quality v2 assessment
-        _update(run_id, "running", "Quality v2 assessment (Claude API)", 0.62)
+        _update(run_id, "running", "质量评估 v2 (Claude API)", 0.65, phase="analysis", phase_progress=0.60)
         try:
             quality_v2 = llm_service.assess_quality_v2(df)
             cache_service.save_analysis_result(run_id, "quality_v2", quality_v2)
         except Exception as e:
             logger.warning("Quality v2 skipped: %s", e)
 
-        # ====== Phase 2 Steps (14-18) ======
+        _update(run_id, "running", "用户分层", 0.70, phase="analysis", phase_progress=0.65)
+        try:
+            user_service.compute_user_segments(days=90)
+        except Exception as e:
+            logger.warning("User segmentation skipped: %s", e)
 
-        # Step 14: Retention analysis
-        _update(run_id, "running", "Computing user retention cohorts", 0.68)
+        _update(run_id, "running", "向量索引 (FAISS)", 0.75, phase="analysis", phase_progress=0.70)
+        try:
+            n_indexed = embedding_service.build_index()
+            logger.info("FAISS index built with %d vectors", n_indexed)
+        except Exception as e:
+            logger.warning("Embedding index skipped: %s", e)
+
+        _update(run_id, "running", "效果分析", 0.80, phase="analysis", phase_progress=0.76)
+        try:
+            effect_service.compute_effect_analysis("like_count")
+        except Exception as e:
+            logger.warning("Effect analysis skipped: %s", e)
+
+        _update(run_id, "running", "留存分析", 0.84, phase="analysis", phase_progress=0.80)
         try:
             retention_service.compute_retention()
         except Exception as e:
             logger.warning("Retention analysis skipped: %s", e)
 
-        # Step 15: User creation path analysis
-        _update(run_id, "running", "Analyzing user creation paths", 0.73)
+        _update(run_id, "running", "创作路径分析", 0.87, phase="analysis", phase_progress=0.84)
         try:
             path_service.compute_user_paths()
         except Exception as e:
             logger.warning("User path analysis skipped: %s", e)
 
-        # Step 16: BERTopic topic modeling
-        _update(run_id, "running", "Training BERTopic model", 0.78)
+        _update(run_id, "running", "BERTopic 主题模型", 0.90, phase="analysis", phase_progress=0.87)
         try:
             bertopic_service.compute_bertopic()
         except Exception as e:
             logger.warning("BERTopic skipped: %s", e)
 
-        # Step 17: Hot template mining
-        _update(run_id, "running", "Mining hot prompt templates", 0.85)
+        _update(run_id, "running", "爆款模板挖掘", 0.93, phase="analysis", phase_progress=0.91)
         try:
             template_service.mine_hot_templates()
         except Exception as e:
             logger.warning("Template mining skipped: %s", e)
 
-        # Step 18: Effect analysis (collect_count + score)
-        _update(run_id, "running", "Running effect analysis (multi-metric)", 0.88)
+        _update(run_id, "running", "多指标效果分析", 0.96, phase="analysis", phase_progress=0.95)
         try:
             effect_service.compute_effect_analysis("collect_count")
             effect_service.compute_effect_analysis("score")
         except Exception as e:
             logger.warning("Multi-metric effect analysis skipped: %s", e)
 
-        # ====== Phase 3 Steps (19-22) ======
+        _update(run_id, "running", "收尾", 0.99, phase="analysis", phase_progress=0.99)
 
-        # Step 19: pgvector sync (if enabled)
-        _update(run_id, "running", "Syncing embeddings to pgvector", 0.92)
+        # pgvector / Redis (optional, skip silently)
         try:
             from app.services import pg_service
             if pg_service.is_available():
                 pg_service.init_pgvector()
-                logger.info("pgvector sync - using embedding_service data")
-                # Get embeddings from FAISS and upsert to PG
-                import json, os
-                from app.config import settings
-                if os.path.exists(settings.faiss_id_map_path):
-                    with open(settings.faiss_id_map_path, "r") as f:
-                        id_data = json.load(f)
-                    meta = id_data.get("meta", {})
-                    logger.info("pgvector: %d records available", len(meta))
-            else:
-                logger.info("pgvector disabled, skipping sync")
-        except Exception as e:
-            logger.warning("pgvector sync skipped: %s", e)
-
-        # Step 20: Redis cache warm-up (if enabled)
-        _update(run_id, "running", "Warming Redis cache", 0.95)
+        except Exception:
+            pass
         try:
             from app.services import redis_cache
             if redis_cache.is_available():
-                # Cache key analysis results
                 for key in ["retention", "user_paths", "bertopic", "hot_templates"]:
                     result = cache_service.get_analysis_result(key)
                     if result:
                         redis_cache.set(f"analysis:{key}", result)
-                logger.info("Redis cache warmed")
-            else:
-                logger.info("Redis disabled, skipping cache warm")
-        except Exception as e:
-            logger.warning("Redis warm skipped: %s", e)
+        except Exception:
+            pass
 
-        # Step 21: Data quality checks
-        _update(run_id, "running", "Running data quality checks", 0.97)
-        try:
-            prompt_count = cache_service.get_prompt_count()
-            quality_report = {
-                "prompt_count": prompt_count,
-                "has_engagement_data": prompt_count > 0,
-                "analysis_results_count": 0,
-            }
-            with cache_service.get_conn() as conn:
-                ar_count = conn.execute("SELECT COUNT(DISTINCT result_type) FROM analysis_results").fetchone()
-                quality_report["analysis_results_count"] = ar_count[0] if ar_count else 0
-            cache_service.save_analysis_result(run_id, "quality_report", quality_report)
-        except Exception as e:
-            logger.warning("Quality check skipped: %s", e)
-
-        # Step 22: Final summary
-        _update(run_id, "running", "Finalizing", 0.99)
-
-        _update(run_id, "completed", "Analysis complete (22 steps)", 1.0)
-        logger.info("Pipeline completed successfully for run %d (22 steps)", run_id)
+        _update(run_id, "completed", "分析完成", 1.0, phase="analysis", phase_progress=1.0)
+        logger.info("Pipeline completed successfully for run %d", run_id)
 
     except Exception as e:
         logger.error("Pipeline failed: %s", e, exc_info=True)
@@ -266,6 +224,9 @@ def _run_pipeline(run_id: int):
             _current_run_id = None
 
 
-def _update(run_id, status, step, progress):
-    cache_service.update_analysis_run(run_id, status=status, step=step, progress=progress)
+def _update(run_id, status, step, progress, phase="analysis", phase_progress=None):
+    cache_service.update_analysis_run(
+        run_id, status=status, step=step, progress=progress,
+        phase=phase, phase_progress=phase_progress if phase_progress is not None else progress,
+    )
     logger.info("[Run %d] %s: %s (%.0f%%)", run_id, status, step, progress * 100)

@@ -2,69 +2,60 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
+
+import pandas as pd
 
 from app.config import settings
-from app.services import athena_service, cache_service
+from app.services import cache_service
 
 logger = logging.getLogger(__name__)
 
 
 def compute_retention(window_days: int = None) -> dict:
-    """Compute cohort retention matrix and key retention metrics.
+    """Compute cohort retention matrix and key retention metrics from cached data.
 
     Cohort: users grouped by their first-seen day.
-    Matrix: for each cohort, how many users came back on day 1, 3, 7, 14, 30, 60.
-
-    Returns:
-        {
-          "cohorts": [{"cohort": "2026-03-01", "size": 120, "retention": {"1": 45, "7": 20, ...}}],
-          "overall": {"d1": 0.32, "d3": 0.25, "d7": 0.18, "d14": 0.12, "d30": 0.08},
-          "re_generation": {"single_day": 450, "multi_day": 120, "rate": 0.21},
-          "avg_active_interval_days": 5.3,
-        }
+    Matrix: for each cohort, how many users came back on day 1, 3, 7, 14, 30.
     """
     if window_days is None:
         window_days = settings.retention_cohort_window_days
 
-    logger.info("Computing retention for last %d days...", window_days)
+    logger.info("Computing retention for last %d days from cache...", window_days)
 
-    # Step 1: Get first-seen + all active days for each user
-    sql = f"""
-        WITH user_activity AS (
-            SELECT
-                user_id,
-                pt AS activity_date,
-                MIN(pt) OVER (PARTITION BY user_id) AS first_seen
-            FROM silver.clean_tripo_project
-            WHERE prompt IS NOT NULL AND prompt != ''
-              AND user_id IS NOT NULL AND user_id != ''
-              AND pt >= date_format(date_add('day', -{window_days}, current_date), '%Y%m%d')
-            GROUP BY user_id, pt
-        )
-        SELECT
-            first_seen,
-            activity_date,
-            COUNT(DISTINCT user_id) AS user_count
-        FROM user_activity
-        GROUP BY first_seen, activity_date
-        ORDER BY first_seen, activity_date
-    """
-    result = athena_service.run_query(sql)
-    rows = result["rows"]
-    logger.info("Fetched %d cohort-day rows", len(rows))
+    df = cache_service.get_prompts_df()
+    if df.empty:
+        return {
+            "cohorts": [], "overall": {}, "re_generation": {},
+            "avg_active_interval_days": 0, "window_days": window_days,
+            "computed_at": datetime.now().isoformat(),
+        }
 
-    # Build cohort matrix: first_seen -> {day_offset: user_count}
+    # Filter by date window and valid users
+    cutoff = (datetime.now() - timedelta(days=window_days)).strftime("%Y%m%d")
+    df = df[df["pt"].fillna("") >= cutoff]
+    df = df[df["user_id"].fillna("") != ""]
+
+    if df.empty:
+        return {
+            "cohorts": [], "overall": {}, "re_generation": {},
+            "avg_active_interval_days": 0, "window_days": window_days,
+            "computed_at": datetime.now().isoformat(),
+        }
+
+    # Compute first_seen per user
+    first_seen_map = df.groupby("user_id")["pt"].min().rename("first_seen")
+    df = df.merge(first_seen_map, on="user_id")
+
+    # Build cohort data: first_seen -> {day_offset: user_count}
     cohort_data: dict = {}
     cohort_sizes: dict = {}
-    for row in rows:
-        first_seen = row.get("first_seen")
-        activity_date = row.get("activity_date")
-        user_count = _to_int(row.get("user_count"))
 
+    for _, row in df[["user_id", "pt", "first_seen"]].drop_duplicates().iterrows():
+        first_seen = row["first_seen"]
+        activity_date = row["pt"]
         if not first_seen or not activity_date:
             continue
-
         try:
             fs_dt = datetime.strptime(first_seen, "%Y%m%d")
             ad_dt = datetime.strptime(activity_date, "%Y%m%d")
@@ -74,10 +65,10 @@ def compute_retention(window_days: int = None) -> dict:
 
         if first_seen not in cohort_data:
             cohort_data[first_seen] = {}
-        cohort_data[first_seen][offset] = user_count
+        cohort_data[first_seen][offset] = cohort_data[first_seen].get(offset, 0) + 1
 
         if offset == 0:
-            cohort_sizes[first_seen] = user_count
+            cohort_sizes[first_seen] = cohort_sizes.get(first_seen, 0) + 1
 
     # Build cohorts output
     cohorts = []
@@ -106,83 +97,57 @@ def compute_retention(window_days: int = None) -> dict:
         total_returned = sum(c["retention"].get(str(cp), 0) for c in cohorts)
         overall[f"d{cp}"] = round(total_returned / total_initial, 4) if total_initial else 0
 
-    # Re-generation: users with multiple active days vs single-day users
-    user_days_sql = f"""
-        SELECT
-            CASE
-                WHEN active_days = 1 THEN 'single_day'
-                WHEN active_days BETWEEN 2 AND 5 THEN 'few_days'
-                WHEN active_days BETWEEN 6 AND 14 THEN 'frequent'
-                ELSE 'heavy'
-            END AS bucket,
-            COUNT(*) AS user_count,
-            AVG(CAST(active_days AS DOUBLE)) AS avg_days
-        FROM (
-            SELECT user_id, COUNT(DISTINCT pt) AS active_days
-            FROM silver.clean_tripo_project
-            WHERE prompt IS NOT NULL AND prompt != ''
-              AND user_id IS NOT NULL AND user_id != ''
-              AND pt >= date_format(date_add('day', -{window_days}, current_date), '%Y%m%d')
-            GROUP BY user_id
-        )
-        GROUP BY 1
-    """
-    regen_result = athena_service.run_query(user_days_sql)
-    regen_map: dict = {}
-    total_users = 0
-    for row in regen_result["rows"]:
-        bucket = row.get("bucket")
-        cnt = _to_int(row.get("user_count"))
-        regen_map[bucket] = cnt
-        total_users += cnt
+    # Re-generation: bucket users by active day count
+    user_active_days = df.groupby("user_id")["pt"].nunique().reset_index(name="active_days")
+    regen_map: dict = {"single_day": 0, "few_days": 0, "frequent": 0, "heavy": 0}
+    for _, row in user_active_days.iterrows():
+        d = int(row["active_days"])
+        if d == 1:
+            regen_map["single_day"] += 1
+        elif d <= 5:
+            regen_map["few_days"] += 1
+        elif d <= 14:
+            regen_map["frequent"] += 1
+        else:
+            regen_map["heavy"] += 1
 
+    total_users = sum(regen_map.values())
     multi_day = sum(v for k, v in regen_map.items() if k != "single_day")
     re_generation = {
-        "single_day": regen_map.get("single_day", 0),
-        "few_days": regen_map.get("few_days", 0),
-        "frequent": regen_map.get("frequent", 0),
-        "heavy": regen_map.get("heavy", 0),
+        **regen_map,
         "total_users": total_users,
         "multi_day_users": multi_day,
         "rate": round(multi_day / total_users, 4) if total_users else 0,
     }
 
     # Avg active interval (among multi-day users)
-    interval_sql = f"""
-        WITH user_days AS (
-            SELECT user_id, MIN(pt) AS first_day, MAX(pt) AS last_day,
-                   COUNT(DISTINCT pt) AS active_days
-            FROM silver.clean_tripo_project
-            WHERE prompt IS NOT NULL AND prompt != ''
-              AND user_id IS NOT NULL AND user_id != ''
-              AND pt >= date_format(date_add('day', -{window_days}, current_date), '%Y%m%d')
-            GROUP BY user_id
-            HAVING COUNT(DISTINCT pt) > 1
-        )
-        SELECT AVG(
-            CAST(
-                (CAST(SUBSTR(last_day, 1, 4) AS INTEGER) * 10000
-                 + CAST(SUBSTR(last_day, 5, 2) AS INTEGER) * 100
-                 + CAST(SUBSTR(last_day, 7, 2) AS INTEGER))
-              - (CAST(SUBSTR(first_day, 1, 4) AS INTEGER) * 10000
-                 + CAST(SUBSTR(first_day, 5, 2) AS INTEGER) * 100
-                 + CAST(SUBSTR(first_day, 7, 2) AS INTEGER))
-            AS DOUBLE) / NULLIF(active_days - 1, 0)
-        ) AS avg_interval
-        FROM user_days
-    """
-    try:
-        interval_result = athena_service.run_query(interval_sql)
-        avg_interval = _to_float(interval_result["rows"][0].get("avg_interval")) if interval_result["rows"] else 0
-    except Exception as e:
-        logger.warning("Avg interval calc failed: %s", e)
-        avg_interval = 0
+    multi_users = user_active_days[user_active_days["active_days"] > 1]["user_id"]
+    avg_interval = 0.0
+    if len(multi_users) > 0:
+        multi_df = df[df["user_id"].isin(multi_users)]
+        user_span = multi_df.groupby("user_id").agg(
+            first_day=("pt", "min"),
+            last_day=("pt", "max"),
+            active_days=("pt", "nunique"),
+        ).reset_index()
+        intervals = []
+        for _, row in user_span.iterrows():
+            try:
+                fd = datetime.strptime(row["first_day"], "%Y%m%d")
+                ld = datetime.strptime(row["last_day"], "%Y%m%d")
+                span = (ld - fd).days
+                ad = int(row["active_days"]) - 1
+                if ad > 0:
+                    intervals.append(span / ad)
+            except ValueError:
+                pass
+        avg_interval = round(sum(intervals) / len(intervals), 2) if intervals else 0.0
 
     result_data = {
         "cohorts": cohorts,
         "overall": overall,
         "re_generation": re_generation,
-        "avg_active_interval_days": round(avg_interval or 0, 2),
+        "avg_active_interval_days": avg_interval,
         "window_days": window_days,
         "computed_at": datetime.now().isoformat(),
     }

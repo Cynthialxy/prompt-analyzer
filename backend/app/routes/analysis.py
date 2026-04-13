@@ -2,20 +2,16 @@
 
 from flask import Blueprint, jsonify
 
-from app.services import cache_service, athena_service
+from app.services import cache_service
 
 analysis_bp = Blueprint("analysis", __name__)
 
 
 @analysis_bp.route("/categories")
 def get_categories():
-    """Get category/tag distributions - query Athena for accurate data."""
-    try:
-        result = athena_service.fetch_category_distributions()
-        return jsonify(result)
-    except Exception:
-        result = cache_service.get_category_distributions()
-        return jsonify(result)
+    """Get category/tag distributions from cache."""
+    result = cache_service.get_category_distributions()
+    return jsonify(result)
 
 
 @analysis_bp.route("/topics")
@@ -38,56 +34,6 @@ def get_intents():
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
-
-
-def _get_intents_from_athena() -> dict:
-    """Build intent distribution from Athena llm_category + sample prompts."""
-    # Distribution
-    dist_sql = """
-        SELECT llm_category AS intent, COUNT(*) AS count
-        FROM silver.clean_tripo_project
-        WHERE prompt IS NOT NULL AND prompt != ''
-          AND llm_category IS NOT NULL AND llm_category != ''
-        GROUP BY llm_category
-        ORDER BY count DESC
-    """
-    dist_result = athena_service.run_query(dist_sql)
-    total = sum(int(r.get("count", 0)) for r in dist_result["rows"])
-    distribution = [
-        {
-            "intent": r["intent"],
-            "count": int(r["count"]),
-            "percentage": round(int(r["count"]) / total * 100, 2) if total else 0,
-        }
-        for r in dist_result["rows"]
-    ]
-
-    # Sample prompts per intent (top 5)
-    sample_prompts: dict = {}
-    for item in distribution[:10]:
-        intent = item["intent"]
-        sample_sql = f"""
-            SELECT prompt FROM silver.clean_tripo_project
-            WHERE prompt IS NOT NULL AND prompt != ''
-              AND llm_category = '{intent}'
-            LIMIT 5
-        """
-        try:
-            sample_result = athena_service.run_query(sample_sql)
-            sample_prompts[intent] = [
-                r["prompt"][:200] for r in sample_result["rows"]
-                if r.get("prompt") and r["prompt"].strip()
-            ]
-        except Exception:
-            sample_prompts[intent] = []
-
-    return {
-        "distribution": distribution,
-        "sample_prompts": sample_prompts,
-        "sample_size": total,
-        "total_prompts": total,
-        "source": "athena_llm_category",
-    }
 
 
 @analysis_bp.route("/language")

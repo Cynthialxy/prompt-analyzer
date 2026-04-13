@@ -27,6 +27,9 @@ export const fetchPrompts = (params: {
 export const syncData = () =>
   client.post('/data/sync').then(r => r.data);
 
+export const syncAndAnalyze = () =>
+  client.post<{ status: string; run_id: number }>('/data/sync-and-analyze').then(r => r.data);
+
 export const fetchDailyCounts = (params?: { date_from?: string; date_to?: string }) =>
   client.get<{ date: string; count: number }[]>('/data/daily-counts', { params }).then(r => r.data);
 

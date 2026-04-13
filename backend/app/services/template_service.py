@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 from app.config import settings
-from app.services import cache_service, llm_service, athena_service
+from app.services import cache_service, llm_service
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ def mine_hot_templates(metric: str = "like_count", top_k: int = None) -> dict:
         top_k = settings.template_max_templates
 
     # Fetch engaged prompts from Athena (local cache is too small)
-    df = _fetch_engaged_from_athena(metric, min_value=1, limit=3000)
+    df = _fetch_engaged_from_cache(metric, min_value=1, limit=3000)
     if df is None or df.empty:
         df = cache_service.get_prompts_df()
     if df is None or df.empty:
@@ -146,30 +146,15 @@ def _synthesize_template(examples: list, category: str, style: str) -> str:
     return str(examples[0])[:300]
 
 
-def _fetch_engaged_from_athena(metric: str, min_value: int = 1, limit: int = 3000):
-    """Fetch high-engagement prompts from Athena for template mining."""
-    try:
-        sql = f"""
-            SELECT project_id, prompt, llm_category, llm_style, llm_color, llm_use_case,
-                   TRY_CAST(like_count AS BIGINT) AS like_count,
-                   TRY_CAST(collect_count AS BIGINT) AS collect_count,
-                   TRY_CAST(score AS DOUBLE) AS score,
-                   display_image
-            FROM silver.clean_tripo_project
-            WHERE prompt IS NOT NULL AND prompt != ''
-              AND TRY_CAST({metric} AS BIGINT) >= {min_value}
-            ORDER BY TRY_CAST({metric} AS BIGINT) DESC
-            LIMIT {limit}
-        """
-        result = athena_service.run_query(sql)
-        if not result["rows"]:
-            return None
-        df = pd.DataFrame(result["rows"])
-        for col in ["like_count", "collect_count"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
-        df["score"] = pd.to_numeric(df["score"], errors="coerce").fillna(0)
-        logger.info("Fetched %d engaged prompts from Athena for template mining", len(df))
-        return df
-    except Exception as e:
-        logger.warning("Athena fetch for templates failed: %s", e)
+def _fetch_engaged_from_cache(metric: str, min_value: int = 1, limit: int = 3000):
+    """Fetch high-engagement prompts from cached SQLite data for template mining."""
+    df = cache_service.get_prompts_df()
+    if df.empty:
         return None
+    df[metric] = pd.to_numeric(df[metric], errors="coerce").fillna(0)
+    engaged = df[df[metric] >= min_value].sort_values(metric, ascending=False).head(limit)
+    for col in ["like_count", "collect_count"]:
+        engaged[col] = engaged[col].fillna(0).astype(int)
+    engaged["score"] = pd.to_numeric(engaged["score"], errors="coerce").fillna(0)
+    logger.info("Fetched %d engaged prompts from cache for template mining", len(engaged))
+    return engaged

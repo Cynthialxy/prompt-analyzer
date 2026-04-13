@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Layout, Menu, Button, Progress, message } from 'antd';
+import { Layout, Menu, Button, Progress, message, Spin } from 'antd';
 import {
   DashboardOutlined,
   TagsOutlined,
@@ -9,7 +9,6 @@ import {
   AimOutlined,
   TableOutlined,
   SyncOutlined,
-  PlayCircleOutlined,
   ThunderboltOutlined,
   ForkOutlined,
   AppstoreOutlined,
@@ -34,7 +33,7 @@ import {
   useUserSegments,
   useInvalidateCoreData,
 } from '../../hooks/useAnalysisData';
-import { runPipeline, syncData } from '../../api/endpoints';
+import { syncAndAnalyze } from '../../api/endpoints';
 
 // Prefetch all core data once at app load so every tab reads from cache.
 function useGlobalPrefetch() {
@@ -70,49 +69,85 @@ const menuItems = [
   { key: '/templates', icon: <FileTextOutlined />, label: '爆款模板' },
 ];
 
+const STEP_LABELS: Record<string, string> = {
+  '正在增量同步最新数据...': '增量同步数据',
+  '加载数据...': '加载数据',
+  'Detecting languages': '语言检测',
+  'Computing text statistics': '文本统计',
+  'Extracting keywords (TF-IDF)': '关键词提取',
+  'Building topic model (LDA + t-SNE)': '主题建模',
+  'Analyzing trends': '趋势分析',
+  'Classifying intents (Claude API)': '意图分类',
+  'Assessing prompt quality (Claude API)': '质量评估',
+  'Generating theme summary': '主题总结',
+  'Computing user segments': '用户分层',
+  'Building embedding index (FAISS)': '向量索引',
+  'Running effect analysis': '效果分析',
+  'Computing user retention cohorts': '留存分析',
+  'Analyzing user creation paths': '创作路径',
+  'Training BERTopic model': '主题模型',
+  'Mining hot prompt templates': '爆款模板',
+  'Running effect analysis (multi-metric)': '多指标效果分析',
+  'Finalizing': '完成收尾',
+};
+
+function localizeStep(step: string): string {
+  for (const [key, val] of Object.entries(STEP_LABELS)) {
+    if (step.includes(key)) return val;
+  }
+  return step;
+}
+
 const AppLayout: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const [collapsed, setCollapsed] = useState(false);
-  const [pipelinePolling, setPipelinePolling] = useState(false);
-  const { data: pipelineStatus } = usePipelineStatus(pipelinePolling);
+  const [syncing, setSyncing] = useState(false);
+  const { data: pipelineStatus } = usePipelineStatus(syncing);
   const invalidateCoreData = useInvalidateCoreData();
 
-  // Trigger all core queries at app load — results are cached and reused by each tab.
   useGlobalPrefetch();
 
   const handleSync = async () => {
+    if (syncing) return;
     try {
-      message.loading({ content: '正在从 Athena 同步数据...', key: 'sync' });
-      const result = await syncData();
-      message.success({ content: `已同步 ${result.count} 条 Prompt`, key: 'sync' });
+      setSyncing(true);
+      await syncAndAnalyze();
     } catch {
-      message.error({ content: '同步失败', key: 'sync' });
+      message.error('启动失败，请检查后端连接');
+      setSyncing(false);
     }
   };
 
-  const handleRunPipeline = async () => {
-    try {
-      await runPipeline();
-      setPipelinePolling(true);
-      message.info('分析管线已启动');
-    } catch {
-      message.error('启动分析管线失败');
-    }
-  };
-
+  // Watch pipeline status — when done, refresh all charts
   React.useEffect(() => {
-    if (pipelineStatus?.status === 'completed' || pipelineStatus?.status === 'failed') {
-      setPipelinePolling(false);
-      if (pipelineStatus.status === 'completed') {
-        // Pipeline produced new data — invalidate all cached queries so every tab reloads.
-        invalidateCoreData();
-        message.success('分析管线已完成！');
-      } else {
-        message.error(`分析管线失败：${pipelineStatus.error}`);
-      }
+    if (!syncing) return;
+    if (pipelineStatus?.status === 'completed') {
+      setSyncing(false);
+      invalidateCoreData();
+      message.success({ content: '数据已更新，图表已刷新！', duration: 4 });
+    } else if (pipelineStatus?.status === 'failed') {
+      setSyncing(false);
+      message.error(`分析失败：${pipelineStatus.error || '未知错误'}`);
     }
   }, [pipelineStatus?.status]);
+
+  // Parse phase info from config_json
+  let phase = 'sync';
+  let phaseProgress = 0;
+  if (pipelineStatus?.config_json) {
+    try {
+      const cfg = JSON.parse(pipelineStatus.config_json);
+      if (cfg.phase) phase = cfg.phase;
+      if (cfg.phase_progress != null) phaseProgress = cfg.phase_progress;
+    } catch { /* ignore */ }
+  }
+
+  const syncProgress = phase === 'sync' ? Math.round(phaseProgress * 100) : 100;
+  const analysisProgress = phase === 'analysis' ? Math.round(phaseProgress * 100) : (phase === 'sync' ? 0 : 100);
+  const stepLabel = pipelineStatus?.current_step
+    ? localizeStep(pipelineStatus.current_step)
+    : '';
 
   return (
     <Layout style={{ minHeight: '100vh' }}>
@@ -165,28 +200,43 @@ const AppLayout: React.FC = () => {
             Tripo Prompt 分析平台
           </div>
           <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
-            {pipelinePolling && pipelineStatus && (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 200 }}>
-                <Progress
-                  percent={Math.round((pipelineStatus.progress || 0) * 100)}
-                  size="small"
-                  style={{ margin: 0, flex: 1 }}
-                />
-                <span style={{ fontSize: 12, color: '#666', whiteSpace: 'nowrap' }}>
-                  {pipelineStatus.current_step}
-                </span>
+            {syncing && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 320 }}>
+                <Spin size="small" />
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 11, color: '#666', marginBottom: 4 }}>
+                    {phase === 'sync' ? '数据同步中…' : `数据分析中… ${stepLabel ? `· ${stepLabel}` : ''}`}
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
+                    <span style={{ fontSize: 10, color: '#888', width: 48, flexShrink: 0 }}>数据同步</span>
+                    <Progress
+                      percent={syncProgress}
+                      size="small"
+                      style={{ margin: 0, flex: 1 }}
+                      strokeColor="#52c41a"
+                      status={phase === 'sync' ? 'active' : 'success'}
+                    />
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span style={{ fontSize: 10, color: '#888', width: 48, flexShrink: 0 }}>数据分析</span>
+                    <Progress
+                      percent={analysisProgress}
+                      size="small"
+                      style={{ margin: 0, flex: 1 }}
+                      strokeColor="#1677ff"
+                      status={phase === 'analysis' ? 'active' : (analysisProgress === 100 ? 'success' : 'normal')}
+                    />
+                  </div>
+                </div>
               </div>
             )}
-            <Button icon={<SyncOutlined />} onClick={handleSync}>
-              同步数据
-            </Button>
             <Button
               type="primary"
-              icon={<PlayCircleOutlined />}
-              onClick={handleRunPipeline}
-              loading={pipelinePolling}
+              icon={<SyncOutlined spin={syncing} />}
+              onClick={handleSync}
+              loading={syncing}
             >
-              运行分析
+              {syncing ? '同步中…' : '同步数据'}
             </Button>
           </div>
         </Header>

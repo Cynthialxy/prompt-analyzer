@@ -217,6 +217,13 @@ def _to_float(v) -> float | None:
         return None
 
 
+def get_latest_pt() -> str | None:
+    """Return the most recent partition date (pt) in cache."""
+    with get_conn() as conn:
+        row = conn.execute("SELECT MAX(pt) as max_pt FROM prompts").fetchone()
+        return row["max_pt"] if row else None
+
+
 def get_prompt_count() -> int:
     with get_conn() as conn:
         row = conn.execute("SELECT COUNT(*) as cnt FROM prompts").fetchone()
@@ -443,6 +450,7 @@ def compute_quality_from_prompts() -> dict:
     return {"scores": [], "summary": summary, "sample_size": len(rows)}
 
 
+def get_daily_counts(date_from: str = None, date_to: str = None) -> list:
     """Get daily prompt counts, optionally filtered by date range."""
     date_sql, date_params = _date_where(date_from, date_to, "AND")
     with get_conn() as conn:
@@ -467,7 +475,8 @@ def save_analysis_run(config: dict = None) -> int:
 
 
 def update_analysis_run(run_id: int, status: str = None, step: str = None,
-                        progress: float = None, error: str = None):
+                        progress: float = None, error: str = None,
+                        phase: str = None, phase_progress: float = None):
     with get_conn() as conn:
         updates = []
         params = []
@@ -486,6 +495,22 @@ def update_analysis_run(run_id: int, status: str = None, step: str = None,
         if status == "completed":
             updates.append("completed_at = ?")
             params.append(datetime.now().isoformat())
+        # Store phase info as JSON in config_json (reuse existing column)
+        if phase is not None or phase_progress is not None:
+            # Read current config_json and merge phase info
+            row = conn.execute("SELECT config_json FROM analysis_runs WHERE id = ?", (run_id,)).fetchone()
+            cfg = {}
+            if row and row["config_json"]:
+                try:
+                    cfg = json.loads(row["config_json"])
+                except Exception:
+                    cfg = {}
+            if phase is not None:
+                cfg["phase"] = phase
+            if phase_progress is not None:
+                cfg["phase_progress"] = round(phase_progress, 4)
+            updates.append("config_json = ?")
+            params.append(json.dumps(cfg))
 
         params.append(run_id)
         conn.execute(f"UPDATE analysis_runs SET {', '.join(updates)} WHERE id = ?", params)

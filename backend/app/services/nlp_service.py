@@ -31,12 +31,15 @@ def detect_language(text: str) -> str:
 
 def analyze_languages(df: pd.DataFrame) -> dict:
     """Detect languages for all prompts and compute distributions."""
-    logger.info("Detecting languages for %d prompts...", len(df))
-    languages = df["prompt"].apply(detect_language)
-    df["detected_language"] = languages
+    logger.info("Detecting languages for %d prompts (sampled 5000)...", len(df))
+    # Language detection is slow per-row; sample is statistically representative
+    sample = df["prompt"].dropna()
+    if len(sample) > 5000:
+        sample = sample.sample(5000, random_state=42)
+    languages = sample.apply(detect_language)
 
     lang_counts = languages.value_counts().to_dict()
-    total = len(df)
+    total = len(sample)
 
     distribution = [
         {"language": lang, "count": count, "percentage": round(count / total * 100, 2)}
@@ -98,13 +101,15 @@ def analyze_text_statistics(df: pd.DataFrame) -> dict:
     }
 
 
-def extract_keywords(df: pd.DataFrame, top_n: int = 100) -> dict:
+def extract_keywords(df: pd.DataFrame, top_n: int = 100, sample_size: int = 50000) -> dict:
     """Extract keywords using TF-IDF."""
-    logger.info("Extracting keywords via TF-IDF from %d prompts...", len(df))
+    logger.info("Extracting keywords via TF-IDF from %d prompts (sample=%d)...", len(df), sample_size)
+
+    sample_df = df if len(df) <= sample_size else df.sample(sample_size, random_state=42)
 
     # Separate Chinese and English for proper tokenization
     texts = []
-    for prompt in df["prompt"]:
+    for prompt in sample_df["prompt"]:
         cleaned = clean_prompt(prompt)
         if is_chinese(cleaned):
             import jieba
@@ -135,6 +140,7 @@ def extract_keywords(df: pd.DataFrame, top_n: int = 100) -> dict:
         "feature_names": feature_names,
         "vectorizer": vectorizer,
         "texts": texts,
+        "sample_df": sample_df,
     }
 
 

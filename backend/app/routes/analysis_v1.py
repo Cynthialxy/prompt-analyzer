@@ -181,7 +181,6 @@ def get_effect_analysis():
         if cached:
             return jsonify(cached)
         result = effect_service.compute_effect_analysis(metric=metric)
-        cache_service.save_analysis_result(cache_key, result)
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500

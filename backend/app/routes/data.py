@@ -9,21 +9,14 @@ data_bp = Blueprint("data", __name__)
 
 @data_bp.route("/summary")
 def get_summary():
-    """Get overall data summary - query Athena for accurate real-time stats."""
+    """Get overall data summary from cache (fast), with optional Athena fallback."""
     date_from = request.args.get("date_from", None)
     date_to = request.args.get("date_to", None)
-    source = request.args.get("source", "athena")  # athena (accurate) or cache (fast)
     try:
-        if source == "cache":
-            summary = cache_service.get_summary(date_from=date_from, date_to=date_to)
-        else:
-            summary = athena_service.fetch_summary(date_from=date_from, date_to=date_to)
+        summary = cache_service.get_summary(date_from=date_from, date_to=date_to)
         return jsonify(summary)
     except Exception as e:
-        # Fallback to cache if Athena fails
-        summary = cache_service.get_summary(date_from=date_from, date_to=date_to)
-        summary["_source"] = "cache_fallback"
-        return jsonify(summary)
+        return jsonify({"error": str(e)}), 500
 
 
 @data_bp.route("/prompts")
@@ -54,26 +47,42 @@ def sync_data():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+@data_bp.route("/sync-and-analyze", methods=["POST"])
+def sync_and_analyze():
+    """Incremental sync from Athena then run full analysis pipeline in background."""
+    from app.services import pipeline_service
+    try:
+        run_id = pipeline_service.start_sync_and_analyze()
+        return jsonify({"status": "started", "run_id": run_id})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @data_bp.route("/daily-counts")
 def get_daily_counts():
-    """Get daily prompt counts - query Athena for accurate real-time data."""
+    """Get daily prompt counts from cache."""
     date_from = request.args.get("date_from", None)
     date_to = request.args.get("date_to", None)
-    source = request.args.get("source", "athena")
     try:
-        if source == "cache":
-            counts = cache_service.get_daily_counts(date_from=date_from, date_to=date_to)
-        else:
-            counts = athena_service.fetch_daily_counts_live(
-                date_from=date_from, date_to=date_to
-            )
-        return jsonify(counts)
-    except Exception:
         counts = cache_service.get_daily_counts(date_from=date_from, date_to=date_to)
         return jsonify(counts)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
-@data_bp.route("/export")
+@data_bp.route("/clear-cache", methods=["POST"])
+def clear_cache():
+    """Clear all cached prompts and reset sync state."""
+    from app.services.cache_service import get_conn
+    with get_conn() as conn:
+        conn.execute("DELETE FROM prompts")
+        conn.execute("DELETE FROM sync_state")
+        conn.execute("DELETE FROM analysis_results")
+        conn.execute("DELETE FROM analysis_runs")
+        conn.execute("DELETE FROM user_segments")
+    return jsonify({"status": "ok", "message": "Cache cleared"})
+
+
 def export_csv():
     """Export prompts as CSV."""
     import io

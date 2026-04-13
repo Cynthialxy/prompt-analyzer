@@ -11,7 +11,7 @@ import re
 from collections import defaultdict
 from typing import Optional
 
-from app.services import athena_service
+from app.services import cache_service
 
 logger = logging.getLogger(__name__)
 
@@ -182,40 +182,33 @@ def classify_prompt(text: str) -> tuple:
 
 
 def compute_intent_distribution(sample_limit: int = 20000) -> dict:
-    """Compute intent distribution by classifying prompts from Athena.
+    """Compute intent distribution by classifying prompts from cached SQLite data.
 
     Strategy:
-    1. Sample non-empty prompts from Athena with their metadata
+    1. Load cached prompts (up to sample_limit)
     2. Classify each prompt using keyword rules
     3. Build distribution, sub-intent breakdown, intent×category cross-tab
     4. Attach sample prompts per intent
     """
-    logger.info("Computing intent v2 distribution (sample=%d)...", sample_limit)
+    logger.info("Computing intent v2 distribution (sample=%d) from cache...", sample_limit)
 
-    # Athena doesn't support true random sampling efficiently; use TABLESAMPLE
-    sql = f"""
-        SELECT prompt, llm_category,
-               TRY_CAST(like_count AS BIGINT) AS like_count,
-               TRY_CAST(collect_count AS BIGINT) AS collect_count
-        FROM silver.clean_tripo_project TABLESAMPLE BERNOULLI(1)
-        WHERE prompt IS NOT NULL AND prompt != ''
-        LIMIT {sample_limit}
-    """
-    try:
-        result = athena_service.run_query(sql)
-    except Exception as e:
-        logger.warning("TABLESAMPLE failed (%s), falling back to LIMIT", e)
-        sql_fallback = f"""
-            SELECT prompt, llm_category,
-                   TRY_CAST(like_count AS BIGINT) AS like_count,
-                   TRY_CAST(collect_count AS BIGINT) AS collect_count
-            FROM silver.clean_tripo_project
-            WHERE prompt IS NOT NULL AND prompt != ''
-            LIMIT {sample_limit}
-        """
-        result = athena_service.run_query(sql_fallback)
+    df = cache_service.get_prompts_df()
+    if df.empty:
+        return {
+            "distribution": [], "sub_intent_distribution": [],
+            "intent_category_cross": {"intents": [], "categories": [], "matrix": []},
+            "intent_engagement": [], "sample_prompts": {}, "insights": [],
+            "sample_size": 0, "total_prompts": 0, "source": "cache_empty",
+        }
 
-    rows = result["rows"]
+    # Sample up to sample_limit rows
+    if len(df) > sample_limit:
+        df = df.sample(n=sample_limit, random_state=42)
+
+    df["like_count"] = df["like_count"].fillna(0)
+    df["collect_count"] = df["collect_count"].fillna(0)
+
+    rows = df[["prompt", "llm_category", "like_count", "collect_count"]].to_dict("records")
     total = len(rows)
     logger.info("Classifying %d prompts...", total)
 

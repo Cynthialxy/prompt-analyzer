@@ -4,7 +4,9 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta
 
-from app.services import athena_service, cache_service
+import pandas as pd
+
+from app.services import cache_service
 
 logger = logging.getLogger(__name__)
 
@@ -36,41 +38,79 @@ def classify_segment(total_prompts: int, active_days: int, last_seen: str) -> st
 
 
 def compute_user_segments(days: int = 30, top_n: int = 50000) -> dict:
-    """Compute user segments from Athena data and persist to SQLite.
+    """Compute user segments from cached SQLite data and persist results."""
+    logger.info("Computing user segments (last %d days, top %d users) from cache...", days, top_n)
 
-    Args:
-        days: look back window in days for user activity aggregation.
-        top_n: max number of users to aggregate (ordered by total_prompts DESC).
+    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
 
-    Returns:
-        Summary dict with segment counts and top users.
-    """
-    logger.info("Computing user segments (last %d days, top %d users)...", days, top_n)
+    with cache_service.get_conn() as conn:
+        count = conn.execute("SELECT COUNT(*) as cnt FROM prompts").fetchone()["cnt"]
+        if count == 0:
+            logger.warning("No cached prompts for user segment computation")
+            return {"segments": {}, "total_users": 0, "computed_at": datetime.now().isoformat()}
 
-    sql = f"""
-        SELECT
-            user_id,
-            COUNT(*) AS total_prompts,
-            COUNT(DISTINCT pt) AS active_days,
-            MIN(pt) AS first_seen,
-            MAX(pt) AS last_seen,
-            AVG(CAST(like_count AS DOUBLE)) AS avg_like_count,
-            SUM(CAST(like_count AS BIGINT)) AS total_like_count,
-            AVG(CAST(score AS DOUBLE)) AS avg_score,
-            MAX_BY(llm_category, 1) AS top_category,
-            MAX_BY(llm_style, 1) AS top_style
-        FROM silver.clean_tripo_project
-        WHERE prompt IS NOT NULL AND prompt != ''
-          AND user_id IS NOT NULL AND user_id != ''
-          AND pt >= date_format(date_add('day', -{days}, current_date), '%Y%m%d')
-        GROUP BY user_id
-        ORDER BY total_prompts DESC
-        LIMIT {top_n}
-    """
+        # Aggregate per user entirely in SQL — avoids loading 600K rows into pandas
+        rows_raw = conn.execute(f"""
+            SELECT
+                user_id,
+                COUNT(*) as total_prompts,
+                COUNT(DISTINCT pt) as active_days,
+                MIN(pt) as first_seen,
+                MAX(pt) as last_seen,
+                AVG(CAST(like_count AS REAL)) as avg_like_count,
+                SUM(CAST(like_count AS INTEGER)) as total_like_count,
+                AVG(CAST(score AS REAL)) as avg_score
+            FROM prompts
+            WHERE user_id IS NOT NULL AND user_id != ''
+              AND pt >= ?
+            GROUP BY user_id
+            ORDER BY total_prompts DESC
+            LIMIT ?
+        """, (cutoff, top_n)).fetchall()
 
-    result = athena_service.run_query(sql)
-    rows = result["rows"]
-    logger.info("Fetched %d user aggregates from Athena", len(rows))
+        # Top category per user via SQL (most frequent)
+        cat_map = {}
+        for r in conn.execute(f"""
+            SELECT user_id, llm_category, COUNT(*) as cnt
+            FROM prompts
+            WHERE user_id IS NOT NULL AND user_id != ''
+              AND llm_category IS NOT NULL AND llm_category != ''
+              AND pt >= ?
+            GROUP BY user_id, llm_category
+        """, (cutoff,)).fetchall():
+            uid = r["user_id"]
+            if uid not in cat_map or r["cnt"] > cat_map[uid][1]:
+                cat_map[uid] = (r["llm_category"], r["cnt"])
+
+        style_map = {}
+        for r in conn.execute(f"""
+            SELECT user_id, llm_style, COUNT(*) as cnt
+            FROM prompts
+            WHERE user_id IS NOT NULL AND user_id != ''
+              AND llm_style IS NOT NULL AND llm_style != ''
+              AND pt >= ?
+            GROUP BY user_id, llm_style
+        """, (cutoff,)).fetchall():
+            uid = r["user_id"]
+            if uid not in style_map or r["cnt"] > style_map[uid][1]:
+                style_map[uid] = (r["llm_style"], r["cnt"])
+
+    rows = []
+    for r in rows_raw:
+        uid = r["user_id"]
+        rows.append({
+            "user_id": uid,
+            "total_prompts": r["total_prompts"],
+            "active_days": r["active_days"],
+            "first_seen": r["first_seen"] or "",
+            "last_seen": r["last_seen"] or "",
+            "avg_like_count": r["avg_like_count"] or 0.0,
+            "total_like_count": r["total_like_count"] or 0,
+            "avg_score": r["avg_score"] or 0.0,
+            "top_category": cat_map.get(uid, (None,))[0],
+            "top_style": style_map.get(uid, (None,))[0],
+        })
+    logger.info("Aggregated %d users from cache via SQL", len(rows))
 
     # Classify and persist
     segment_counts = {"power_user": 0, "regular": 0, "casual": 0, "churned": 0}
@@ -188,81 +228,48 @@ def get_segment_overview(segment: str = None, sort_by: str = "total_prompts",
 
 
 def get_user_profile(user_id: str) -> dict:
-    """Get detailed profile for a single user, querying Athena for fresh data."""
-    logger.info("Fetching user profile for %s", user_id)
+    """Get detailed profile for a single user from cached SQLite data."""
+    logger.info("Fetching user profile for %s from cache", user_id)
 
-    # Aggregate stats
-    stats_sql = f"""
-        SELECT
-            COUNT(*) AS total_prompts,
-            COUNT(DISTINCT pt) AS active_days,
-            MIN(pt) AS first_seen,
-            MAX(pt) AS last_seen,
-            AVG(CAST(like_count AS DOUBLE)) AS avg_like_count,
-            SUM(CAST(like_count AS BIGINT)) AS total_like_count,
-            SUM(CAST(collect_count AS BIGINT)) AS total_collect_count,
-            AVG(CAST(score AS DOUBLE)) AS avg_score,
-            AVG(LENGTH(prompt)) AS avg_prompt_length
-        FROM silver.clean_tripo_project
-        WHERE user_id = '{user_id}' AND prompt IS NOT NULL AND prompt != ''
-    """
-    stats_result = athena_service.run_query(stats_sql)
-    stats = stats_result["rows"][0] if stats_result["rows"] else {}
+    df = cache_service.get_prompts_df()
+    udf = df[df["user_id"] == user_id].copy()
 
-    total_prompts = _to_int(stats.get("total_prompts"))
-    active_days = _to_int(stats.get("active_days"))
-    last_seen = stats.get("last_seen") or ""
+    if udf.empty:
+        return {"user_id": user_id, "segment": "casual", "summary": {}, "error": "用户数据不在缓存中"}
+
+    udf["like_count"] = pd.to_numeric(udf["like_count"], errors="coerce").fillna(0)
+    udf["collect_count"] = pd.to_numeric(udf["collect_count"], errors="coerce").fillna(0)
+    udf["score"] = pd.to_numeric(udf["score"], errors="coerce").fillna(0)
+
+    total_prompts = len(udf)
+    active_days = udf["pt"].nunique()
+    first_seen = udf["pt"].min() or ""
+    last_seen = udf["pt"].max() or ""
     segment = classify_segment(total_prompts, active_days, last_seen)
 
     # Category distribution
-    cat_sql = f"""
-        SELECT llm_category AS name, COUNT(*) AS count
-        FROM silver.clean_tripo_project
-        WHERE user_id = '{user_id}'
-          AND prompt IS NOT NULL AND prompt != ''
-          AND llm_category IS NOT NULL AND llm_category != ''
-        GROUP BY llm_category
-        ORDER BY count DESC
-        LIMIT 10
-    """
-    cat_result = athena_service.run_query(cat_sql)
+    cat_dist = (
+        udf[udf["llm_category"].fillna("") != ""]
+        .groupby("llm_category").size().reset_index(name="count")
+        .sort_values("count", ascending=False).head(10)
+    )
 
     # Style distribution
-    style_sql = f"""
-        SELECT llm_style AS name, COUNT(*) AS count
-        FROM silver.clean_tripo_project
-        WHERE user_id = '{user_id}'
-          AND prompt IS NOT NULL AND prompt != ''
-          AND llm_style IS NOT NULL AND llm_style != ''
-        GROUP BY llm_style
-        ORDER BY count DESC
-        LIMIT 10
-    """
-    style_result = athena_service.run_query(style_sql)
+    style_dist = (
+        udf[udf["llm_style"].fillna("") != ""]
+        .groupby("llm_style").size().reset_index(name="count")
+        .sort_values("count", ascending=False).head(10)
+    )
 
     # Activity timeline
-    timeline_sql = f"""
-        SELECT pt AS date, COUNT(*) AS count
-        FROM silver.clean_tripo_project
-        WHERE user_id = '{user_id}'
-          AND prompt IS NOT NULL AND prompt != ''
-          AND pt IS NOT NULL
-        GROUP BY pt
-        ORDER BY pt
-    """
-    timeline_result = athena_service.run_query(timeline_sql)
+    timeline = (
+        udf[udf["pt"].fillna("") != ""]
+        .groupby("pt").size().reset_index(name="count")
+        .sort_values("pt")
+    )
 
     # Top prompts by like_count
-    top_sql = f"""
-        SELECT project_id, prompt, like_count, collect_count, score,
-               llm_category, llm_style, created_at, pt
-        FROM silver.clean_tripo_project
-        WHERE user_id = '{user_id}'
-          AND prompt IS NOT NULL AND prompt != ''
-        ORDER BY CAST(like_count AS BIGINT) DESC
-        LIMIT 10
-    """
-    top_result = athena_service.run_query(top_sql)
+    top_prompts = udf.sort_values("like_count", ascending=False).head(10)
 
     return {
         "user_id": user_id,
@@ -270,39 +277,39 @@ def get_user_profile(user_id: str) -> dict:
         "summary": {
             "total_prompts": total_prompts,
             "active_days": active_days,
-            "first_seen": stats.get("first_seen"),
+            "first_seen": first_seen,
             "last_seen": last_seen,
-            "avg_likes": round(_to_float(stats.get("avg_like_count")) or 0, 2),
-            "total_likes": _to_int(stats.get("total_like_count")),
-            "total_collects": _to_int(stats.get("total_collect_count")),
-            "avg_score": round(_to_float(stats.get("avg_score")) or 0, 2),
-            "avg_prompt_length": round(_to_float(stats.get("avg_prompt_length")) or 0, 1),
+            "avg_likes": round(float(udf["like_count"].mean()), 2),
+            "total_likes": int(udf["like_count"].sum()),
+            "total_collects": int(udf["collect_count"].sum()),
+            "avg_score": round(float(udf["score"].mean()), 2),
+            "avg_prompt_length": round(float(udf["prompt"].str.len().mean()), 1),
         },
         "category_distribution": [
-            {"name": r.get("name"), "count": _to_int(r.get("count"))}
-            for r in cat_result["rows"]
+            {"name": r["llm_category"], "count": int(r["count"])}
+            for _, r in cat_dist.iterrows()
         ],
         "style_distribution": [
-            {"name": r.get("name"), "count": _to_int(r.get("count"))}
-            for r in style_result["rows"]
+            {"name": r["llm_style"], "count": int(r["count"])}
+            for _, r in style_dist.iterrows()
         ],
         "activity_timeline": [
-            {"date": r.get("date"), "count": _to_int(r.get("count"))}
-            for r in timeline_result["rows"]
+            {"date": r["pt"], "count": int(r["count"])}
+            for _, r in timeline.iterrows()
         ],
         "top_prompts": [
             {
                 "project_id": r.get("project_id"),
                 "prompt": r.get("prompt"),
-                "like_count": _to_int(r.get("like_count")),
-                "collect_count": _to_int(r.get("collect_count")),
-                "score": _to_float(r.get("score")),
+                "like_count": int(r.get("like_count", 0)),
+                "collect_count": int(r.get("collect_count", 0)),
+                "score": float(r["score"]) if r.get("score") else None,
                 "llm_category": r.get("llm_category"),
                 "llm_style": r.get("llm_style"),
                 "created_at": r.get("created_at"),
                 "pt": r.get("pt"),
             }
-            for r in top_result["rows"]
+            for _, r in top_prompts.iterrows()
         ],
     }
 

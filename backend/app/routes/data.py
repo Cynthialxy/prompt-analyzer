@@ -83,7 +83,34 @@ def clear_cache():
     return jsonify({"status": "ok", "message": "Cache cleared"})
 
 
-def export_csv():
+@data_bp.route("/prompt/<project_id>")
+def get_prompt(project_id: str):
+    """Get a single prompt by project_id. Tries SQLite first, then Athena."""
+    # 1. Try local cache
+    with cache_service.get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM prompts WHERE project_id = ?", (project_id,)
+        ).fetchone()
+        if row:
+            return jsonify(dict(row))
+
+    # 2. Fallback to Athena
+    try:
+        result = athena_service.run_query(
+            f"SELECT project_id, user_id, prompt, llm_category, llm_style, "
+            f"like_count, collect_count, score, created_at, pt "
+            f"FROM silver.clean_tripo_project "
+            f"WHERE project_id = '{project_id}' LIMIT 1"
+        )
+        if result["rows"]:
+            return jsonify(result["rows"][0])
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    return jsonify({"error": "Prompt not found"}), 404
+
+
+
     """Export prompts as CSV."""
     import io
     import csv

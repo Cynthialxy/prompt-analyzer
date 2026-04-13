@@ -85,6 +85,9 @@ import type {
   HotTemplateData,
 } from '../types';
 
+export const fetchPromptDetail = (projectId: string) =>
+  client.get(`/data/prompt/${projectId}`).then(r => r.data);
+
 export const fetchUserSegments = (params?: { segment?: string; sort_by?: string; limit?: number }) =>
   client.get<UserSegmentResponse>('/v1/analysis/user/segment', { params }).then(r => r.data);
 

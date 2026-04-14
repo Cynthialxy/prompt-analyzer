@@ -37,13 +37,18 @@ logs:
 
 # ── 帮助 ──────────────────────────────────────────────────────────────
 
+export-seed:
+	@echo "Exporting seed data from SQLite..."
+	cd backend && python3 scripts/export_seed.py
+
 help:
 	@echo ""
-	@echo "  make backend     启动后端 (Flask :5000)"
-	@echo "  make frontend    启动前端 (Vite  :3000)"
-	@echo "  make dev         同时启动前后端"
-	@echo "  make stop        停止所有服务"
-	@echo "  make logs        查看日志"
+	@echo "  make backend      启动后端 (Flask :5000)"
+	@echo "  make frontend     启动前端 (Vite  :3000)"
+	@echo "  make dev          同时启动前后端"
+	@echo "  make stop         停止所有服务"
+	@echo "  make logs         查看日志"
+	@echo "  make export-seed  导出全量数据到 backend/seed/"
 	@echo ""
 	@echo "  可覆盖端口: make dev BACKEND_PORT=5001 FRONTEND_PORT=3001"
 	@echo ""

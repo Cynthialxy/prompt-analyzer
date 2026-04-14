@@ -57,6 +57,9 @@ backend/cache/*.json
 backend/cache/faiss_*
 !backend/cache/.gitkeep
 
+# ===== Seed data (large files stored in S3) =====
+backend/seed/prompts.csv
+
 # ===== Logs =====
 *.log
 logs/

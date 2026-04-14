@@ -26,7 +26,8 @@ def create_app():
     app.register_blueprint(pipeline_bp, url_prefix="/api/pipeline")
     app.register_blueprint(analysis_v1_bp, url_prefix="/api/v1/analysis")
 
-    from app.services.cache_service import init_db
+    from app.services.cache_service import init_db, load_seed_data
     init_db()
+    load_seed_data()
 
     return app

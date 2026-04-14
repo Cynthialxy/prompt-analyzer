@@ -547,3 +547,79 @@ def get_analysis_result(result_type: str) -> dict | None:
             (result_type,)
         ).fetchone()
         return json.loads(row["result_json"]) if row else None
+
+
+SEED_S3_BUCKET = "tripo-telescope"
+SEED_S3_KEY = "data-agent/seed/prompts.csv"
+
+
+def load_seed_data():
+    """Import seed CSV/JSON into SQLite if the prompts table is empty.
+
+    Called once at app startup. Safe to call repeatedly — skips if data exists.
+    If prompts.csv is missing locally, downloads it from S3 automatically.
+    """
+    import csv
+    import os
+
+    seed_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))), "seed")
+    prompts_csv = os.path.join(seed_dir, "prompts.csv")
+    analysis_json = os.path.join(seed_dir, "analysis_results.json")
+
+    with get_conn() as conn:
+        count = conn.execute("SELECT COUNT(*) FROM prompts").fetchone()[0]
+        if count > 0:
+            return  # already has data, skip
+
+    # Download from S3 if local file missing
+    if not os.path.exists(prompts_csv):
+        logger.info("prompts.csv not found locally, downloading from S3 ...")
+        try:
+            import boto3
+            os.makedirs(seed_dir, exist_ok=True)
+            s3 = boto3.client("s3")
+            s3.download_file(SEED_S3_BUCKET, SEED_S3_KEY, prompts_csv)
+            logger.info("Downloaded seed file from s3://%s/%s", SEED_S3_BUCKET, SEED_S3_KEY)
+        except Exception as e:
+            logger.warning("Could not download seed from S3: %s. Skipping seed load.", e)
+            return
+
+    logger.info("Loading seed data from %s ...", prompts_csv)
+
+    with open(prompts_csv, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+
+    if not rows:
+        return
+
+    cols = list(rows[0].keys())
+    placeholders = ", ".join("?" * len(cols))
+    col_names = ", ".join(cols)
+    sql = f"INSERT OR IGNORE INTO prompts ({col_names}) VALUES ({placeholders})"
+
+    with get_conn() as conn:
+        conn.executemany(sql, [list(r.values()) for r in rows])
+
+    logger.info("Seed: imported %d prompts", len(rows))
+
+    # Import analysis results
+    if not os.path.exists(analysis_json):
+        return
+
+    with open(analysis_json, encoding="utf-8") as f:
+        analysis = json.load(f)
+
+    with get_conn() as conn:
+        for result_type, data in analysis.items():
+            existing = conn.execute(
+                "SELECT id FROM analysis_results WHERE result_type = ?", (result_type,)
+            ).fetchone()
+            if not existing:
+                conn.execute(
+                    "INSERT INTO analysis_results (run_id, result_type, result_json) VALUES (0, ?, ?)",
+                    (result_type, json.dumps(data, ensure_ascii=False))
+                )
+
+    logger.info("Seed: imported %d analysis result types", len(analysis))
